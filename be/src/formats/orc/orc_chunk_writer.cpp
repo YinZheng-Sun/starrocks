@@ -35,8 +35,47 @@ uint64_t compressionBlockSize = 1024; // 1k
     break;                                                           \
 
 /*
-**
+**   ORCOutputStream
 */
+
+ORCOutputStream::ORCOutputStream(std::unique_ptr<starrocks::WritableFile> wfile) : _wfile(std::move(wfile)) {}
+
+uint64_t ORCOutputStream::getLength() const {
+    return _wfile->size();
+}
+
+uint64_t ORCOutputStream::getNaturalWriteSize() const {}
+
+const std::string& ORCOutputStream::getName() const {
+    return _wfile->filename();
+}
+
+void ORCOutputStream::write(const void* buf, size_t length)
+{
+    if (_is_closed) {
+        LOG(WARNING) << "The output stream is closed but there are still inputs";
+        return;
+    }
+    const char* ch = reinterpret_cast<const char*>(buf);
+    Status st = _wfile->append(Slice(ch, length));
+    if (!st.ok()) {
+        LOG(WARNING) << "write to orc output stream failed: " << st;
+    }
+    return;
+}
+
+void ORCOutputStream::close() {
+    if (_is_closed) {
+        return;
+    }
+    Status st = _wfile->close();
+    if (!st.ok()) {
+        LOG(WARNING) << "close orc output stream failed: " << st;
+        return;
+    }
+    _is_closed = true;
+    return;
+}
 
 
 Status OrcChunkWriter::_make_schema() {

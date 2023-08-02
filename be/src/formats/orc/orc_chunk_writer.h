@@ -33,6 +33,27 @@ namespace starrocks {
 // OrcChunkWriter is a bridge between apache/orc file and chunk, wraps orc::writer
 // Write chunks into buffer. Flush on closing.
 
+class ORCOutputStream : public orc::OutputStream {
+public:
+    ORCOutputStream(std::unique_ptr<starrocks::WritableFile> wfile);
+
+    ~ORCOutputStream() override;
+    
+    uint64_t getLength() const override;
+    
+    uint64_t getNautralWriteSize() const override {}
+    
+    void write(const void * buf, size_t length) override;
+
+    void close() override;
+
+    const std::string& getName() const override;
+
+private:
+    std::unique_ptr<starrocks::WritableFile> _wfile;
+    bool _is_closed = false;
+}
+
 
 class OrcChunkWriter {
 public:
@@ -53,9 +74,9 @@ private:
     std::vector<string> _field_names;                   //chunk中各个列的column name
     std::vector<SlotDescriptor*> _slot_descriptors;
     orc::WriterOptions _writer_options;                 //用于配置写入的参数，如压缩算法，压缩等级等
-    std::unique_ptr<orc::OutputStream> _outStream;      //负责文件落盘
     std::unique_ptr<orc::ColumnVectorBatch> _batch;  
     std::unique_ptr<orc::Type>  _schema;                //维护表的schema
+    ORCOutputStream _output_stream;
     // std::vector<FillCVBFunction> _fill_functions;    //负责将对应的Column填充到CVB中
 };
 } // namespace starrocks
