@@ -57,8 +57,8 @@ private:
 
 class OrcChunkWriter {
 public:
-    OrcChunkWriter();
-    Status init_writer(const std::vector<TypeDescriptor>& type_descs, std::unique<orc::OutputStream> outputstream);
+    OrcChunkWriter(const std::vector<TypeDescriptor>& type_descs);
+    Status init_writer();
     
     Status write(Chunk* chunk);
 
@@ -71,12 +71,13 @@ private:
     uint32_t _batchsize = 4096;
     std::unique_ptr<orc::Writer> _writer;               //负责将数据写入到buffer
     std::vector<TypeDescriptor> _type_descs;            //chunk中各个列的type信息
-    std::vector<string> _field_names;                   //chunk中各个列的column name
+    std::vector<string> _field_names;                   //chunk中各列的column name
     std::vector<SlotDescriptor*> _slot_descriptors;
     orc::WriterOptions _writer_options;                 //用于配置写入的参数，如压缩算法，压缩等级等
     std::unique_ptr<orc::ColumnVectorBatch> _batch;  
     std::unique_ptr<orc::Type>  _schema;                //维护表的schema
     ORCOutputStream _output_stream;
+    std::vector<std::unique_ptr<ORCColumnWriter>> _column_writers;
     // std::vector<FillCVBFunction> _fill_functions;    //负责将对应的Column填充到CVB中
 };
 } // namespace starrocks

@@ -77,7 +77,6 @@ void ORCOutputStream::close() {
     return;
 }
 
-
 Status OrcChunkWriter::_make_schema() {
     if (_schema) {
         _schema.reset();
@@ -110,14 +109,15 @@ Status OrcChunkWriter::_make_schema() {
     return Status::OK();
 }
 
-Status OrcChunkWriter::init_writer(const std::vector<TypeDescriptor>& type_descs, std::unique<orc::OutputStream> outputstream) {
-    _type_descs = type_descs;
-
+Status OrcChunkWriter::init_writer() {
     // try create orc writer
+    if (!_schema) {
+        _make_schema();
+    }
     try {
-        _writer = orc::createWriter( , std::move(outputstream), _writer_options)
+        _writer = orc::createWriter(*_schema, &_output_stream, _writer_options);
     } catch (std::exception& e) {
-        return Status::InternalError("Init OrcReader failed. reason = {}", e.what());
+        return Status::InternalError("Init Orc Writer failed. reason = {}", e.what());
     }
     return Status::OK();
 }
@@ -125,14 +125,20 @@ Status OrcChunkWriter::init_writer(const std::vector<TypeDescriptor>& type_descs
 
 
 OrcChunkWriter::OrcChunkWriter() {
-    _batch = _writer->createRowBatch(_batchsize);
-
 }
 
 Status OrcChunkWriter::write(Chunk* chunk) {
-    int column_size = _type_descs.size();
-    for (int i = 0; i < column_size; ++i) {
+    if (!_writer) {
+        init_writer();
+    }
+    size_t column_num = chunk->num_columns();
+    size_t rows_num = chunk->num_rows();
 
+    std::unique_ptr<orc::ColumnVectorBatch> batch = writer->createRowBatch(getMaxColumnSize(chunk));
+    orc::StructVectorBatch & root = dynamic_cast<orc::StructVectorBatch &>(*batch);
+
+    for (size_t i = 0; i < column_num; ++i) {
+        
     }
     return Status::OK();
 }
