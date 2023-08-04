@@ -29,28 +29,35 @@ uint64_t stripeSize = 16 * 1024;      // 16K
 uint64_t compressionBlockSize = 1024; // 1k
 
 
-#define CREATE_ORC_PRIMITIVE_TYPE(orctype) \
-    std::unique_ptr<Type> field_type = createPrimitiveType(orctype); \
-    _schema->addStructField(field_names[i], std::move(field_type));  \
+#define CREATE_ORC_PRIMITIVE_TYPE(orctype)                           \
+   {                                                                 \
+    std::unique_ptr<orc::Type> field_type = orc::createPrimitiveType(orctype); \
+    _schema->addStructField(_field_names[i], std::move(field_type));  \
     break;                                                           \
-
+   }
 /*
 **   ORCOutputStream
 */
 
-ORCOutputStream::ORCOutputStream(std::unique_ptr<starrocks::WritableFile> wfile) : _wfile(std::move(wfile)) {}
+OrcOutputStream::OrcOutputStream(std::unique_ptr<starrocks::WritableFile> wfile) : _wfile(std::move(wfile)) {}
 
-uint64_t ORCOutputStream::getLength() const {
+OrcOutputStream::~OrcOutputStream() {
+    
+}
+
+uint64_t OrcOutputStream::getLength() const {
     return _wfile->size();
 }
 
-uint64_t ORCOutputStream::getNaturalWriteSize() const {}
+uint64_t OrcOutputStream::getNaturalWriteSize() const {
+    return 0;
+}
 
-const std::string& ORCOutputStream::getName() const {
+const std::string& OrcOutputStream::getName() const {
     return _wfile->filename();
 }
 
-void ORCOutputStream::write(const void* buf, size_t length)
+void OrcOutputStream::write(const void* buf, size_t length)
 {
     if (_is_closed) {
         LOG(WARNING) << "The output stream is closed but there are still inputs";
@@ -64,7 +71,7 @@ void ORCOutputStream::write(const void* buf, size_t length)
     return;
 }
 
-void ORCOutputStream::close() {
+void OrcOutputStream::close() {
     if (_is_closed) {
         return;
     }
@@ -81,10 +88,10 @@ Status OrcChunkWriter::_make_schema() {
     if (_schema) {
         _schema.reset();
     }
-    _schema = createStructType();
-    int column_size = _type_descs.size();
-    static_assert(column_size == field_names.size());
-    for (int i = 0; i < column_size; ++i) {
+    _schema = orc::createStructType();
+    size_t column_size = _type_descs.size();
+    // static_assert(column_size == _field_names.size());
+    for (size_t i = 0; i < column_size; ++i) {
         TypeDescriptor type_desc = _type_descs[i];
         switch (type_desc.type) {
         case TYPE_INT:
@@ -104,6 +111,7 @@ Status OrcChunkWriter::_make_schema() {
         case TYPE_VARCHAR:
             CREATE_ORC_PRIMITIVE_TYPE(orc::TypeKind::VARCHAR);
         default:
+            break;
         }
     }
     return Status::OK();
@@ -115,27 +123,26 @@ Status OrcChunkWriter::init_writer() {
         _make_schema();
     }
     try {
-        _writer = orc::createWriter(*_schema, &_output_stream, _writer_options);
+        _writer = orc::createWriter(*_schema, _output_stream, _writer_options);
     } catch (std::exception& e) {
-        return Status::InternalError("Init Orc Writer failed. reason = {}", e.what());
+        return Status::InternalError("Init Orc Writer failed");
     }
     return Status::OK();
 }
 
 
 
-OrcChunkWriter::OrcChunkWriter() {
-}
+
 
 Status OrcChunkWriter::write(Chunk* chunk) {
     if (!_writer) {
         init_writer();
     }
     size_t column_num = chunk->num_columns();
-    size_t rows_num = chunk->num_rows();
+    // size_t rows_num = chunk->num_rows();
 
-    std::unique_ptr<orc::ColumnVectorBatch> batch = writer->createRowBatch(getMaxColumnSize(chunk));
-    orc::StructVectorBatch & root = dynamic_cast<orc::StructVectorBatch &>(*batch);
+    // std::unique_ptr<orc::ColumnVectorBatch> batch = _writer->createRowBatch(getMaxColumnSize(chunk));
+    // orc::StructVectorBatch & root = dynamic_cast<orc::StructVectorBatch &>(*batch);
 
     for (size_t i = 0; i < column_num; ++i) {
         
@@ -145,11 +152,6 @@ Status OrcChunkWriter::write(Chunk* chunk) {
 
 void OrcChunkWriter::close() {
     _writer->close();
-}
-
-
-int64_t ChunkWriter::estimated_buffered_bytes() const {
-    return 0;
 }
 
 } // namespace starrocks

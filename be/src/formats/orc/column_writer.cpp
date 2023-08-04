@@ -20,10 +20,10 @@
 
 namespace starrocks {
 
-StatusOr<std::unique_ptr<ORCColumnWriter>> ORCColumnWriter::create(const TypeDescriptor& type,
+StatusOr<std::unique_ptr<OrcColumnWriter>> OrcColumnWriter::create(const TypeDescriptor& type,
                                                                    const orc::Type* orc_type, bool nullable,
                                                                    const OrcMappingPtr& orc_mapping,
-                                                                   ORCColumnWriter* writer) {
+                                                                   OrcChunkWriter* writer) {
     if (type.is_complex_type() && orc_mapping == nullptr) {
         return Status::InternalError("Complex type must having OrcMapping");
     }
@@ -126,7 +126,7 @@ StatusOr<std::unique_ptr<ORCColumnWriter>> ORCColumnWriter::create(const TypeDes
     }
 }
 
-Status BooleanColumnReader::get_next(orc::ColumnVectorBatch* cvb, ColumnPtr& col, size_t from, size_t size) {
+Status BooleanColumnWriter::get_next(orc::ColumnVectorBatch* cvb, ColumnPtr& col, size_t from, size_t size) {
     if (_nullable) {
         auto* data = down_cast<orc::LongVectorBatch*>(cvb);
         int col_start = col->size();
@@ -171,13 +171,13 @@ Status IntColumnWriter<Type>::get_next(orc::ColumnVectorBatch* cvb, ColumnPtr& c
         {
             auto* data = dynamic_cast<orc::LongVectorBatch*>(cvb);
             if (data != nullptr) {
-                return _fill_cvb_from_int_column_with_null<orc::LongVectorBatch>(data, col, from, size);
+                return _fill_cvb_from_int_column_with_null<orc::LongVectorBatch>(data, col);
             }
         }
         {
             auto* data = dynamic_cast<orc::DoubleVectorBatch*>(cvb);
             if (data != nullptr) {
-                return _fill_int_column_with_null_from_cvb<orc::DoubleVectorBatch>(data, col, from, size);
+                return _fill_cvb_from_int_column<orc::DoubleVectorBatch>(data, col);
             }
         }
         // we have nothing to fill, but have to resize column to save from crash.
@@ -189,7 +189,7 @@ Status IntColumnWriter<Type>::get_next(orc::ColumnVectorBatch* cvb, ColumnPtr& c
         {
             auto* data = dynamic_cast<orc::LongVectorBatch*>(cvb);
             if (data != nullptr) {
-                return _fill_int_column_from_cvb<orc::LongVectorBatch>(data, col, from, size);
+                return _fill_cvb_from_int_column<orc::LongVectorBatch>(data, col);
             }
         }
         // if dyn_cast to long vector batch failed, try to dyn_cast to double vector batch for best effort
@@ -197,11 +197,11 @@ Status IntColumnWriter<Type>::get_next(orc::ColumnVectorBatch* cvb, ColumnPtr& c
         {
             auto* data = dynamic_cast<orc::DoubleVectorBatch*>(cvb);
             if (data != nullptr) {
-                return _fill_int_column_from_cvb<orc::DoubleVectorBatch>(data, col, from, size);
+                return _fill_cvb_from_int_column<orc::DoubleVectorBatch>(data, col);
             }
         }
         // we have nothing to fill, but have to resize column to save from crash.
-        col->resize(col->size() + size);
+        // col->resize(col->size() + size);
     }
     return Status::OK();
 }
@@ -209,7 +209,7 @@ Status IntColumnWriter<Type>::get_next(orc::ColumnVectorBatch* cvb, ColumnPtr& c
 template <LogicalType Type>
 template <typename OrcColumnVectorBatch>
 Status IntColumnWriter<Type>::_fill_cvb_from_int_column_with_null(OrcColumnVectorBatch* cvb, ColumnPtr& col) {
-    int cvb_start = cvb->size();
+    int cvb_start = cvb->data.size();
     int col_size = col->size();
     cvb->resize(cvb_start + col_size);
 
@@ -226,7 +226,7 @@ Status IntColumnWriter<Type>::_fill_cvb_from_int_column_with_null(OrcColumnVecto
             continue;
         }
         cvb->notNull[i + cvb_start] = 1;
-        cvbdata[i + cvb_start] = values[i];
+        cvbd[i + cvb_start] = values[i];
     }
 
     return Status::OK();
@@ -235,22 +235,24 @@ Status IntColumnWriter<Type>::_fill_cvb_from_int_column_with_null(OrcColumnVecto
 
 template <LogicalType Type>
 template <typename OrcColumnVectorBatch>
-Status IntColumnWriter<Type>::_fill_cvb_from_int_column(OrcColumnVectorBatch* data, ColumnPtr& col) {
-    int col_start = col->size();
-    col->resize(col_start + size);
+Status IntColumnWriter<Type>::_fill_cvb_from_int_column(OrcColumnVectorBatch* cvb, ColumnPtr& col) {
+    int cvb_start = cvb->data.size();
+    int col_size = col->size();
+    col->resize(cvb_start + col_size);
 
     auto* values = ColumnHelper::cast_to_raw<Type>(col)->get_data().data();
 
-    auto* cvbd = data->data.data();
+    auto* cvbd = cvb->data.data();
 
-    auto pos = from;
-    for (int i = col_start; i < col_start + size; ++i, ++pos) {
-        values[i] = cvbd[pos];
+    for (size_t i = 0; i < col_size; ++i)
+    {
+        cvb->notNull[i + cvb_start] = 1;
+        cvbd[i + cvb_start] = values[i];
     }
 
     // col_start == 0 and from == 0 means it's at top level of fill chunk, not in the middle of array
     // otherwise `broker_load_filter` does not work.
-    constexpr bool wild_type = (Type == TYPE_BIGINT || Type == TYPE_LARGEINT);
+    // constexpr bool wild_type = (Type == TYPE_BIGINT || Type == TYPE_LARGEINT);
     // don't do overflow check on BIGINT(int64_t) or LARGEINT(int128_t)
 
     return Status::OK();

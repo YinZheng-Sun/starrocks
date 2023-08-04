@@ -17,6 +17,7 @@
 #include <orc/OrcFile.hh>
 #include <utility>
 
+#include "formats/orc/orc_chunk_writer.h"
 #include "column/array_column.h"
 #include "column/map_column.h"
 #include "column/struct_column.h"
@@ -30,48 +31,14 @@ namespace starrocks {
 
 class OrcChunkWriter;
 
-// template <typename T>
-// struct DecimalVectorBatchSelector {
-//     using Type = std::conditional_t<
-//             std::is_same_v<T, int64_t>, orc::Decimal64VectorBatch,
-//             std::conditional_t<std::is_same_v<T, starrocks::int128_t>, orc::Decimal128VectorBatch, void>>;
-// };
-
-// const std::unordered_map<orc::TypeKind, LogicalType> g_orc_starrocks_logical_type_mapping = {
-//         {orc::BOOLEAN, starrocks::TYPE_BOOLEAN},
-//         {orc::BYTE, starrocks::TYPE_TINYINT},
-//         {orc::SHORT, starrocks::TYPE_SMALLINT},
-//         {orc::INT, starrocks::TYPE_INT},
-//         {orc::LONG, starrocks::TYPE_BIGINT},
-//         {orc::FLOAT, starrocks::TYPE_FLOAT},
-//         {orc::DOUBLE, starrocks::TYPE_DOUBLE},
-//         {orc::DECIMAL, starrocks::TYPE_DECIMALV2},
-//         {orc::DATE, starrocks::TYPE_DATE},
-//         {orc::TIMESTAMP, starrocks::TYPE_DATETIME},
-//         {orc::STRING, starrocks::TYPE_VARCHAR},
-//         {orc::BINARY, starrocks::TYPE_VARBINARY},
-//         {orc::CHAR, starrocks::TYPE_CHAR},
-//         {orc::VARCHAR, starrocks::TYPE_VARCHAR},
-//         {orc::TIMESTAMP_INSTANT, starrocks::TYPE_DATETIME},
-// };
-
-// NOLINTNEXTLINE
-// const std::set<LogicalType> g_starrocks_int_type = {
-//         starrocks::TYPE_BOOLEAN, starrocks::TYPE_TINYINT,  starrocks::TYPE_SMALLINT, starrocks::TYPE_INT,
-//         starrocks::TYPE_BIGINT,  starrocks::TYPE_LARGEINT, starrocks::TYPE_FLOAT,    starrocks::TYPE_DOUBLE};
-// const std::set<orc::TypeKind> g_orc_decimal_type = {orc::DECIMAL};
-// const std::set<LogicalType> g_starrocks_decimal_type = {starrocks::TYPE_DECIMAL32, starrocks::TYPE_DECIMAL64,
-//                                                         starrocks::TYPE_DECIMAL128, starrocks::TYPE_DECIMALV2,
-//                                                         starrocks::TYPE_DECIMAL};
-
-class ORCColumnWriter {
+class OrcColumnWriter {
 public:
-    ORCColumnWriter(const TypeDescriptor& type, const orc::Type* orc_type, bool nullable, OrcChunkWriter* writer)
+    OrcColumnWriter(const TypeDescriptor& type, const orc::Type* orc_type, bool nullable, OrcChunkWriter* writer)
             : _type(type), _orc_type(orc_type), _nullable(nullable), _writer(writer) {}
-    virtual ~ORCColumnWriter() = default;
+    virtual ~OrcColumnWriter() = default;
     virtual Status get_next(orc::ColumnVectorBatch* cvb, ColumnPtr& col, size_t from, size_t size) = 0;
 
-    static StatusOr<std::unique_ptr<ORCColumnWriter>> create(const TypeDescriptor& type, const orc::Type* orc_type,
+    static StatusOr<std::unique_ptr<OrcColumnWriter>> create(const TypeDescriptor& type, const orc::Type* orc_type,
                                                              bool nullable, const OrcMappingPtr& orc_mapping,
                                                              OrcChunkWriter* writer);
     const orc::Type* get_orc_type() { return _orc_type; }
@@ -83,10 +50,10 @@ protected:
     OrcChunkWriter* _writer;
 };
 
-class PrimitiveColumnWriter : public ORCColumnWriter {
+class PrimitiveColumnWriter : public OrcColumnWriter {
 public:
-    PrimitiveColumnWriter(const TypeDescriptor& type, const orc::Type* orc_type, bool nullable, ORCColumnWriter* writer)
-            : ORCColumnWriter(type, orc_type, nullable, writer) {}
+    PrimitiveColumnWriter(const TypeDescriptor& type, const orc::Type* orc_type, bool nullable, OrcChunkWriter* writer)
+            : OrcColumnWriter(type, orc_type, nullable, writer) {}
     ~PrimitiveColumnWriter() override = default;
 };
 
@@ -108,10 +75,10 @@ public:
 
 private:
     template <typename OrcColumnVectorBatch>
-    Status _fill_cvb_from_int_column_with_null(OrcColumnVectorBatch* cvb, ColumnPtr& col, size_t from, size_t size);
+    Status _fill_cvb_from_int_column_with_null(OrcColumnVectorBatch* cvb, ColumnPtr& col);
 
     template <typename OrcColumnVectorBatch>
-    Status _fill_cvb_from_int_column(OrcColumnVectorBatch* cvb, starrocks::ColumnPtr& col, size_t from, size_t size);
+    Status _fill_cvb_from_int_column(OrcColumnVectorBatch* cvb, starrocks::ColumnPtr& col);
 };
 
 // template <LogicalType Type>
