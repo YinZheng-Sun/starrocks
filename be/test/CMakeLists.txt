@@ -149,6 +149,7 @@ set(EXEC_FILES
         ./formats/avro/numeric_column_test.cpp
         ./formats/avro/nullable_column_test.cpp
         ./formats/orc/orc_chunk_reader_test.cpp
+        ./formats/orc/orc_chunk_writer_test.cpp
         ./formats/orc/orc_lazy_load_test.cpp
         ./formats/orc/orc_test_util/MemoryOutputStream.cc
         ./formats/orc/orc_test_util/MemoryInputStream.cc

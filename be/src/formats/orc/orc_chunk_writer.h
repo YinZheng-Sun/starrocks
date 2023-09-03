@@ -53,27 +53,42 @@ public:
 
     const std::string& getName() const override;
     
-
 private:
     std::unique_ptr<starrocks::WritableFile> _wfile;
     bool _is_closed = false;
 };
 
+class OrcBuildHelper {
+public:
+    static std::unique_ptr<orc::Type> make_schema(
+            const std::vector<std::string>& file_column_names, const std::vector<TypeDescriptor>& type_descs);
+
+private:
+
+};
+
 
 class OrcChunkWriter {
 public:
-    OrcChunkWriter(std::vector<TypeDescriptor>& type_descs, OrcOutputStream *output_stream) : _type_descs(type_descs), _output_stream(output_stream) {};
+    OrcChunkWriter(std::vector<TypeDescriptor>& type_descs, OrcOutputStream *output_stream, std::unique_ptr<orc::Type> schema) : _schema(std::move(schema)), _type_descs(type_descs), _output_stream(output_stream) {};
     Status init_writer();
-    
     Status write(Chunk* chunk);
 
     void close();
 
-
 private:
-    Status _make_schema();
+    // Status _make_schema();
+    // Status _init_column_writers();
+    // void writeNumbers(orc::ColumnVectorBatch & orc_column, const Column &column);
+    
+    void _write_column(orc::ColumnVectorBatch& orc_column, ColumnPtr& column, TypeDescriptor& type_desc);
+    
+    
+    // template <typename NumberType, typename NumberVectorBatch, typename ConvertFunc>
+    template <LogicalType Type, typename ConvertFunc>
+    void _write_numbers(orc::ColumnVectorBatch & orc_column, ColumnPtr& column, ConvertFunc convert);
 
-    uint32_t _batchsize = 4096;
+
     std::unique_ptr<orc::Writer> _writer;               //负责将数据写入到buffer
     std::vector<TypeDescriptor> _type_descs;            //chunk中各个列的type信息
     std::vector<string> _field_names;                   //chunk中各列的column name
@@ -82,7 +97,6 @@ private:
     std::unique_ptr<orc::ColumnVectorBatch> _batch;  
     std::unique_ptr<orc::Type>  _schema;                //维护表的schema
     OrcOutputStream* _output_stream;
-    std::vector<std::unique_ptr<OrcColumnWriter>> _column_writers;
-    // std::vector<FillCVBFunction> _fill_functions;    //负责将对应的Column填充到CVB中
+    // std::vector<std::unique_ptr<OrcColumnWriter>> _column_writers;
 };
 } // namespace starrocks
