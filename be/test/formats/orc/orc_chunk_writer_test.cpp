@@ -102,18 +102,44 @@ TEST_F(OrcChunkWriterTest, TestSimpleWrite) {
         chunk->append_column(col1, chunk->num_columns());
 
         
-        // auto col2 = ColumnHelper::create_column(TypeDescriptor::from_logical_type(TYPE_INT), true);
-        // std::vector<int32_t> int32_nums{INT32_MIN, INT32_MAX, 0, 1};
-        // count = col2->append_numbers(int32_nums.data(), size(int32_nums) * sizeof(int32_t));
-        // ASSERT_EQ(4, count);
-        // chunk->append_column(col2, chunk->num_columns());
+        auto col2 = ColumnHelper::create_column(TypeDescriptor::from_logical_type(TYPE_INT), true);
+        std::vector<int32_t> int32_nums{INT32_MIN, INT32_MAX, 0, 1};
+        count = col2->append_numbers(int32_nums.data(), size(int32_nums) * sizeof(int32_t));
+        ASSERT_EQ(4, count);
+        chunk->append_column(col2, chunk->num_columns());
 
-        // auto col3 = ColumnHelper::create_column(TypeDescriptor::from_logical_type(TYPE_BIGINT), true);
-        // std::vector<int64_t> int64_nums{INT64_MIN, INT64_MAX, 0, 1};
-        // count = col3->append_numbers(int64_nums.data(), size(int64_nums) * sizeof(int64_t));
-        // ASSERT_EQ(4, count);
-        // chunk->append_column(col3, chunk->num_columns());
+        auto col3 = ColumnHelper::create_column(TypeDescriptor::from_logical_type(TYPE_BIGINT), true);
+        std::vector<int64_t> int64_nums{INT64_MIN, INT64_MAX, 0, 1};
+        count = col3->append_numbers(int64_nums.data(), size(int64_nums) * sizeof(int64_t));
+        ASSERT_EQ(4, count);
+        chunk->append_column(col3, chunk->num_columns());
     }
+    auto column_names = _make_type_names(type_descs);
+    auto schema = OrcBuildHelper::make_schema(column_names, type_descs);
+    // write chunk
+    auto st = _write_chunk(chunk, type_descs, std::move(schema));
+    ASSERT_OK(st);
+}
+
+TEST_F(OrcChunkWriterTest, TestWriteVarchar) {
+    auto type_varchar = TypeDescriptor::from_logical_type(TYPE_VARCHAR);
+    std::vector<TypeDescriptor> type_descs{type_varchar};
+
+    auto chunk = std::make_shared<Chunk>();
+    {
+        auto data_column = BinaryColumn::create();
+        data_column->append("hello");
+        data_column->append("world");
+        data_column->append("starrocks");
+        data_column->append("lakehouse");
+
+        auto null_column = UInt8Column::create();
+        std::vector<uint8_t> nulls = {1, 0, 1, 0};
+        null_column->append_numbers(nulls.data(), nulls.size());
+        auto nullable_column = NullableColumn::create(data_column, null_column);
+        chunk->append_column(nullable_column, chunk->num_columns());
+    }
+
     auto column_names = _make_type_names(type_descs);
     auto schema = OrcBuildHelper::make_schema(column_names, type_descs);
     // write chunk

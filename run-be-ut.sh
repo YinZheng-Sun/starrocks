@@ -107,8 +107,11 @@ if [ ${HELP} -eq 1 ]; then
     exit 0
 fi
 
-CMAKE_BUILD_TYPE=${BUILD_TYPE:-ASAN}
+CMAKE_BUILD_TYPE=Debug
 CMAKE_BUILD_TYPE="${CMAKE_BUILD_TYPE}"
+
+
+
 if [[ -z ${USE_SSE4_2} ]]; then
     USE_SSE4_2=ON
 fi
@@ -239,26 +242,28 @@ test_files=`find ${STARROCKS_TEST_BINARY_DIR} -type f -perm -111 -name "*test" \
 
 # run cases in starrocks_test in parallel if has gtest-parallel script.
 # reference: https://github.com/google/gtest-parallel
-if [[ $TEST_MODULE == '.*'  || $TEST_MODULE == 'starrocks_test' ]]; then
-  echo "Run test: ${STARROCKS_TEST_BINARY_DIR}/starrocks_test"
-  if [ ${DRY_RUN} -eq 0 ]; then
-    if [ -x ${GTEST_PARALLEL} ]; then
-        ${GTEST_PARALLEL} ${STARROCKS_TEST_BINARY_DIR}/starrocks_test \
-            --gtest_filter=${TEST_NAME} \
-            --serialize_test_cases ${GTEST_PARALLEL_OPTIONS}
-    else
-        ${STARROCKS_TEST_BINARY_DIR}/starrocks_test $GTEST_OPTIONS --gtest_filter=${TEST_NAME}
-    fi
-  fi
-fi
+# if [[ $TEST_MODULE == '.*'  || $TEST_MODULE == 'starrocks_test' ]]; then
+#   echo "Run test: ${STARROCKS_TEST_BINARY_DIR}/starrocks_test"
+#   if [ ${DRY_RUN} -eq 0 ]; then
+#     if [ -x ${GTEST_PARALLEL} ]; then
+#         ${GTEST_PARALLEL} ${STARROCKS_TEST_BINARY_DIR}/starrocks_test \
+#             --gtest_filter=${TEST_NAME} \
+#             --serialize_test_cases ${GTEST_PARALLEL_OPTIONS}
+#     else
+#         ${STARROCKS_TEST_BINARY_DIR}/starrocks_test $GTEST_OPTIONS --gtest_filter=${TEST_NAME}
+#     fi
+#   fi
+# fi
 
-for test in $test_files
-do
-    echo "Run test: $test"
-    if [ ${DRY_RUN} -eq 0 ]; then
-        file_name=${test##*/}
-        if [ -z $RUN_FILE ] || [ $file_name == $RUN_FILE ]; then
-            $test $GTEST_OPTIONS --gtest_filter=${TEST_NAME}
-        fi
-    fi
-done
+# for test in $test_files
+# do
+#     echo "Run test: $test"
+#     if [ ${DRY_RUN} -eq 0 ]; then
+#         file_name=${test##*/}
+#         if [ -z $RUN_FILE ] || [ $file_name == $RUN_FILE ]; then
+#             $test $GTEST_OPTIONS --gtest_filter=${TEST_NAME}
+#         fi
+#     fi
+# done
+
+cgdb --args be/ut_build_Debug/test/starrocks_test --gtest_filter=OrcChunkWriterTest.TestWriteVarchar
