@@ -23,20 +23,9 @@
 #include "exprs/expr.h"
 #include "util/defer_op.h"
 #include "formats/orc/orc_chunk_writer.h"
+#include "gutil/strings/substitute.h"
 
 namespace starrocks {
-
-uint64_t stripeSize = 16 * 1024;      // 16K
-uint64_t compressionBlockSize = 1024; // 1k
-
-
-#define CREATE_ORC_PRIMITIVE_TYPE(srType, orcType)                                  \
-    case srType:                                                                    \
-    {                                                                               \
-        std::unique_ptr<orc::Type> field_type = orc::createPrimitiveType(orcType);  \
-        schema->addStructField(file_column_names[i], std::move(field_type));        \
-    }                                                                               \
-    break;
 
 /*
 ** ORCOutputStream
@@ -85,7 +74,7 @@ void OrcOutputStream::close() {
     return;
 }
 
-void OrcChunkWriter::set_compression(const TCompressionType::type& compression_type) {
+Status OrcChunkWriter::set_compression(const TCompressionType::type& compression_type) {
     switch (compression_type) {
     case TCompressionType::SNAPPY: {
         _writer_options.setCompression(orc::CompressionKind::CompressionKind_SNAPPY);
@@ -107,20 +96,94 @@ void OrcChunkWriter::set_compression(const TCompressionType::type& compression_t
         _writer_options.setCompression(orc::CompressionKind::CompressionKind_LZO);
         break;
     }
-    default:
+    case TCompressionType::NO_COMPRESSION: {
         _writer_options.setCompression(orc::CompressionKind::CompressionKind_NONE);
+        break;
+    }
+    default:
+        return Status::InternalError("The Compression Type Not Supported");
+    }
+    return Status::OK();
+}
+
+StatusOr<std::unique_ptr<orc::Type>> OrcChunkWriter::_get_orc_type(const TypeDescriptor& type_desc) {
+    switch (type_desc.type) {
+        case TYPE_BOOLEAN: {
+            return orc::createPrimitiveType(orc::TypeKind::BOOLEAN);
+        }
+        case TYPE_TINYINT: [[fallthrough]];
+        case TYPE_UNSIGNED_TINYINT: {
+            return orc::createPrimitiveType(orc::TypeKind::BYTE);
+        }
+        case TYPE_SMALLINT: [[fallthrough]];
+        case TYPE_UNSIGNED_SMALLINT: {
+            return orc::createPrimitiveType(orc::TypeKind::SHORT);
+        }
+        case TYPE_INT: [[fallthrough]];
+        case TYPE_UNSIGNED_INT: {
+            return orc::createPrimitiveType(orc::TypeKind::INT);
+        }
+        case TYPE_BIGINT: [[fallthrough]];
+        case TYPE_UNSIGNED_BIGINT: {
+            return orc::createPrimitiveType(orc::TypeKind::LONG);
+        }
+        case TYPE_FLOAT: {
+            return orc::createPrimitiveType(orc::TypeKind::FLOAT);
+        }
+        case TYPE_DOUBLE: {
+            return orc::createPrimitiveType(orc::TypeKind::DOUBLE);
+        }
+        case TYPE_CHAR: [[fallthrough]];
+        case TYPE_VARCHAR: {
+            return orc::createPrimitiveType(orc::TypeKind::STRING);
+        }
+        case TYPE_DECIMAL: [[fallthrough]];
+        case TYPE_DECIMAL32: [[fallthrough]];
+        case TYPE_DECIMAL64: [[fallthrough]];
+        case TYPE_DECIMAL128: {
+            return orc::createDecimalType(type_desc.precision, type_desc.scale);
+        }
+        case TYPE_STRUCT: {
+            auto struct_type = orc::createStructType(); 
+            for (size_t i = 0; i < type_desc.children.size(); ++i) {
+                const TypeDescriptor& child_type = type_desc.children[i];
+                ASSIGN_OR_RETURN(
+                    std::unique_ptr<orc::Type> child_orc_type,
+                    OrcChunkWriter::_get_orc_type(child_type));
+                struct_type->addStructField(type_desc.field_names[i], std::move(child_orc_type));
+            }
+            return struct_type;
+        }
+        case TYPE_MAP: {
+            const TypeDescriptor& key_type = type_desc.children[0];
+            const TypeDescriptor& value_type = type_desc.children[1];
+            if (key_type.is_unknown_type() || value_type.is_unknown_type()) {
+                return Status::InternalError("Not Supported For ORC Output Format");
+            }
+            ASSIGN_OR_RETURN(
+                    std::unique_ptr<orc::Type> key_orc_type,
+                    OrcChunkWriter::_get_orc_type(key_type));
+            ASSIGN_OR_RETURN(
+                    std::unique_ptr<orc::Type> value_orc_type,
+                    OrcChunkWriter::_get_orc_type(value_type));
+            return orc::createMapType(std::move(key_orc_type), std::move(value_orc_type));
+        }
+        case TYPE_ARRAY: {
+            const TypeDescriptor& child_type = type_desc.children[0];
+            ASSIGN_OR_RETURN(
+                    std::unique_ptr<orc::Type> child_orc_type,
+                    OrcChunkWriter::_get_orc_type(child_type));
+            return orc::createListType(std::move(child_orc_type));
+        }
+        default:
+            return Status::InternalError("Not Supported For ORC Output Format");
     }
 }
 
 
-Status OrcChunkWriter::init_writer() {
-    _writer = orc::createWriter(*_schema, _output_stream, _writer_options);
-    return Status::OK();
-}
-
 Status OrcChunkWriter::write(Chunk* chunk) {
     if (!_writer) {
-        init_writer();
+        _writer = orc::createWriter(*_schema, _output_stream, _writer_options);
     }
     size_t num_rows = chunk->num_rows();
     size_t column_size = chunk->num_columns();
@@ -129,10 +192,10 @@ Status OrcChunkWriter::write(Chunk* chunk) {
 
     std::unique_ptr<orc::ColumnVectorBatch> batch = _writer->createRowBatch(config::vector_chunk_size);
     orc::StructVectorBatch & root = dynamic_cast<orc::StructVectorBatch &>(*batch);
-
+    Status st;
 
     for (size_t i = 0; i < column_size; ++i) {
-        _write_column(*root.fields[i], columns[i], _type_descs[i]);
+        RETURN_IF_ERROR(_write_column(*root.fields[i], columns[i], _type_descs[i]));
     }
 
     root.numElements = num_rows;
@@ -140,64 +203,83 @@ Status OrcChunkWriter::write(Chunk* chunk) {
     return Status::OK();
 }
 
-void OrcChunkWriter::_write_column(orc::ColumnVectorBatch& orc_column, ColumnPtr& column, TypeDescriptor& type_desc) {
+Status OrcChunkWriter::_write_column(orc::ColumnVectorBatch& orc_column, ColumnPtr& column, const TypeDescriptor& type_desc) {
     switch (type_desc.type) {
-        case TYPE_BOOLEAN:
-        {
+        case TYPE_BOOLEAN: {
             _write_numbers<TYPE_BOOLEAN, orc::LongVectorBatch>(orc_column, column);
             break;
         }
-        case TYPE_TINYINT:
-        {
+        case TYPE_TINYINT: {
             _write_numbers<TYPE_TINYINT, orc::LongVectorBatch>(orc_column, column);
             break;
         }
-        case TYPE_SMALLINT:
-        {
+        case TYPE_SMALLINT: {
             _write_numbers<TYPE_SMALLINT, orc::LongVectorBatch>(orc_column, column);
             break;
         }
-        case TYPE_INT:
-        {
+        case TYPE_INT: {
             _write_numbers<TYPE_INT, orc::LongVectorBatch>(orc_column, column);
             break;
         }
-        case TYPE_BIGINT:
-        {
+        case TYPE_BIGINT: {
             _write_numbers<TYPE_BIGINT, orc::LongVectorBatch>(orc_column, column);
             break;
         }
-        case TYPE_LARGEINT:
-        {
-            // _write_numbers<TYPE_BIGINT, orc::DoubleVectorBatch>(orc_column, column, [] (const int64 & value) { return value; });
-            break;
-        }
-        case TYPE_FLOAT:
-        {
+        case TYPE_FLOAT: {
             _write_numbers<TYPE_FLOAT, orc::DoubleVectorBatch>(orc_column, column);
         }
-        case TYPE_DOUBLE:
-        {
+        case TYPE_DOUBLE: {
             _write_numbers<TYPE_DOUBLE, orc::DoubleVectorBatch>(orc_column, column);
         }
         case TYPE_CHAR: [[fallthrough]];
-        case TYPE_VARCHAR:
-        {
+        case TYPE_VARCHAR: {
             _write_strings(orc_column, column);
             break;
         }
-        case TYPE_DECIMAL:
-        {
-            _write_decimals<TYPE_DECIMAL>(orc_column, column, [] (const double & value) { return value; }, type_desc.precision, type_desc.scale);
+        case TYPE_DECIMAL: {
+            _write_decimals<TYPE_DECIMAL>(orc_column, column, [] (const int128_t & value) { return orc::Int128(value >> 64, (value << 64) >> 64); }, type_desc.precision, type_desc.scale);
+            break;
+        }
+        case TYPE_DECIMAL32: {
+            _write_decimal32or64or128<TYPE_DECIMAL32, orc::Decimal64VectorBatch, int64_t>(orc_column, column, type_desc.precision, type_desc.scale);
+            break;
+        }
+        case TYPE_DECIMAL64: {
+            _write_decimal32or64or128<TYPE_DECIMAL64, orc::Decimal64VectorBatch, int64_t>(orc_column, column, type_desc.precision, type_desc.scale);
+            break;
+        }
+        case TYPE_DECIMAL128: {
+            _write_decimal32or64or128<TYPE_DECIMAL128, orc::Decimal128VectorBatch, int128_t>(orc_column, column, type_desc.precision, type_desc.scale);
+            break;
+        }
+        case TYPE_DATE: {
+            _write_datetimes(orc_column, column);
+            break;
+        }
+        case TYPE_DATETIME: {
+            _write_timestamps(orc_column, column);  
+            break;
+        }
+        case TYPE_ARRAY: {
+            RETURN_IF_ERROR(_write_array_column(orc_column, column, type_desc));
+            break;
+        }
+        case TYPE_STRUCT: {
+            RETURN_IF_ERROR(_write_struct_column(orc_column, column, type_desc));
+            break;
+        }
+        case TYPE_MAP: {
+            RETURN_IF_ERROR(_write_map_column(orc_column, column, type_desc));
             break;
         }
         default:
-            break;
+            return Status::NotSupported(strings::Substitute("Type $0 not supported", type_desc.type));
     }
+    return Status::OK();
 }
 
-template <LogicalType Type, typename VectorBatchType, typename ConvertFunc>
-void OrcChunkWriter::_write_numbers(orc::ColumnVectorBatch & orc_column, ColumnPtr& column, ConvertFunc convert) {
+template <LogicalType Type, typename VectorBatchType>
+void OrcChunkWriter::_write_numbers(orc::ColumnVectorBatch & orc_column, ColumnPtr& column) {
     auto & number_orc_column = dynamic_cast<VectorBatchType &>(orc_column);
     number_orc_column.resize(column->size());
     number_orc_column.notNull.resize(column->size());
@@ -226,7 +308,6 @@ void OrcChunkWriter::_write_numbers(orc::ColumnVectorBatch & orc_column, ColumnP
     number_orc_column.numElements = column->size();
 }
 
-// template <LogicalType Type>
 void OrcChunkWriter::_write_strings(orc::ColumnVectorBatch & orc_column, ColumnPtr& column) {
     auto & string_orc_column = dynamic_cast<orc::StringVectorBatch &>(orc_column);
     string_orc_column.resize(column->size());
@@ -262,9 +343,56 @@ void OrcChunkWriter::_write_strings(orc::ColumnVectorBatch & orc_column, ColumnP
     string_orc_column.numElements = column->size();
 }
 
+template <LogicalType DecimalType, typename VectorBatchType, typename T>
+void OrcChunkWriter::_write_decimal32or64or128(orc::ColumnVectorBatch & orc_column, ColumnPtr& column, int precision, int scale) {
+    auto & decimal_orc_column = dynamic_cast<VectorBatchType &>(orc_column);
+    using Type = RunTimeCppType<DecimalType>;
+
+    decimal_orc_column.resize(column->size());
+    decimal_orc_column.notNull.resize(column->size());
+
+    decimal_orc_column.precision = precision;
+    decimal_orc_column.scale = scale;
+
+    if (column->is_nullable()) {
+        auto c = ColumnHelper::as_raw_column<NullableColumn>(column);
+        auto* nulls = c->null_column()->get_data().data();
+        auto* values = ColumnHelper::cast_to_raw<DecimalType>(c->data_column())->get_data().data();
+        
+        for (size_t i = 0; i < column->size(); ++i) {
+            if (nulls[i]) {
+                decimal_orc_column.notNull[i] = 0;
+                continue;
+            }
+            decimal_orc_column.notNull[i] = 1;
+            T value;
+            DecimalV3Cast::to_decimal_trivial<Type, T, false>(values[i], &value);
+            if constexpr (std::is_same_v<T, int128_t>) {
+                decimal_orc_column.values[i] = orc::Int128{value >> 64, (value << 64) >> 64};
+            } else {
+                decimal_orc_column.values[i] = value;
+            }
+        }
+        orc_column.hasNulls = true;
+    } else {
+        auto* values = ColumnHelper::cast_to_raw<DecimalType>(column)->get_data().data();
+        for (size_t i = 0; i < column->size(); ++i) {
+            decimal_orc_column.notNull[i] = 1;
+            T value;
+            DecimalV3Cast::to_decimal_trivial<Type, T, false>(values[i], &value);
+            if constexpr (std::is_same_v<T, int128_t>) {
+                decimal_orc_column.values[i] = orc::Int128{value >> 64, (value << 64) >> 64};
+            } else {
+                decimal_orc_column.values[i] = value;
+            }
+        }
+    }
+    decimal_orc_column.numElements = column->size();
+}
+
 template <LogicalType DecimalType, typename ConvertFunc>
 void OrcChunkWriter::_write_decimals(orc::ColumnVectorBatch & orc_column, ColumnPtr& column, ConvertFunc convert, int precision, int scale) {
-    auto & decimal_orc_column = dynamic_cast<orc::Decimal64VectorBatch &>(orc_column);
+    auto & decimal_orc_column = dynamic_cast<orc::Decimal128VectorBatch &>(orc_column);
 
     decimal_orc_column.resize(column->size());
     decimal_orc_column.notNull.resize(column->size());
@@ -293,46 +421,196 @@ void OrcChunkWriter::_write_decimals(orc::ColumnVectorBatch & orc_column, Column
             decimal_orc_column.values[i] = convert(values[i]);
         }
     }
+    decimal_orc_column.numElements = column->size();
+}
+
+void OrcChunkWriter::_write_datetimes(orc::ColumnVectorBatch & orc_column, ColumnPtr& column) {
+    auto & date_orc_column = dynamic_cast<orc::LongVectorBatch &>(orc_column);
+    date_orc_column.resize(column->size());
+    date_orc_column.notNull.resize(column->size());
+
+    if (column->is_nullable()) {
+        auto c = ColumnHelper::as_raw_column<NullableColumn>(column);
+        auto* nulls = c->null_column()->get_data().data();
+        auto* values = ColumnHelper::cast_to_raw<TYPE_DATE>(c->data_column())->get_data().data();
+        
+        for (size_t i = 0; i < column->size(); ++i) {
+            if (nulls[i]) {
+                date_orc_column.notNull[i] = 0;
+                continue;
+            }
+            date_orc_column.notNull[i] = 1;
+            date_orc_column.data[i] = OrcDateHelper::native_date_to_orc_date(values[i]);
+        }
+        orc_column.hasNulls = true;
+    } else {
+        auto* values = ColumnHelper::cast_to_raw<TYPE_DATE>(column)->get_data().data();
+        for (size_t i = 0; i < column->size(); ++i) {
+            date_orc_column.notNull[i] = 1;
+            date_orc_column.data[i] = OrcDateHelper::native_date_to_orc_date(values[i]);
+        }
+    }
+    date_orc_column.numElements = column->size();
+}
+
+void OrcChunkWriter::_write_timestamps(orc::ColumnVectorBatch & orc_column, ColumnPtr& column) {
+    auto & timestamp_orc_column = dynamic_cast<orc::TimestampVectorBatch &>(orc_column);
+    timestamp_orc_column.resize(column->size());
+    timestamp_orc_column.notNull.resize(column->size());
+
+    if (column->is_nullable()) {
+        auto c = ColumnHelper::as_raw_column<NullableColumn>(column);
+        auto* nulls = c->null_column()->get_data().data();
+        auto* values = ColumnHelper::cast_to_raw<TYPE_DATETIME>(c->data_column())->get_data().data();
+        
+        for (size_t i = 0; i < column->size(); ++i) {
+            if (nulls[i]) {
+                timestamp_orc_column.notNull[i] = 0;
+                continue;
+            }
+            timestamp_orc_column.notNull[i] = 1;
+            OrcTimestampHelper::native_ts_to_orc_ts(values[i], timestamp_orc_column.data[i], timestamp_orc_column.nanoseconds[i]);
+        }
+        orc_column.hasNulls = true;
+    } else {
+        auto* values = ColumnHelper::cast_to_raw<TYPE_DATETIME>(column)->get_data().data();
+        for (size_t i = 0; i < column->size(); ++i) {
+            timestamp_orc_column.notNull[i] = 1;
+            OrcTimestampHelper::native_ts_to_orc_ts(values[i], timestamp_orc_column.data[i], timestamp_orc_column.nanoseconds[i]);
+        }
+    }
+    timestamp_orc_column.numElements = column->size();
+}
+
+Status OrcChunkWriter::_write_array_column(orc::ColumnVectorBatch & orc_column, ColumnPtr& column, const TypeDescriptor& type) {
+    auto & array_orc_column = dynamic_cast<orc::ListVectorBatch &>(orc_column);
+    array_orc_column.resize(column->size());
+    array_orc_column.notNull.resize(column->size());
+    auto & value_orc_column = *array_orc_column.elements;
+
+    if (column->is_nullable()) {
+        auto* col_nullable = down_cast<NullableColumn*>(column.get());
+        auto* array_cols = down_cast<ArrayColumn*>(col_nullable->data_column().get());
+        uint32_t* offsets = array_cols->offsets_column().get()->get_data().data();
+        auto* nulls = col_nullable->null_column()->get_data().data();
+             
+        for (size_t i = 0; i < column->size(); ++i) {
+            array_orc_column.offsets[i + 1] = offsets[i];
+            array_orc_column.notNull[i] = !nulls[i];
+        }
+        
+        RETURN_IF_ERROR(_write_column(value_orc_column, array_cols->elements_column(), type.children[0]));
+        array_orc_column.hasNulls = true;
+    } else {
+        auto* array_cols = down_cast<ArrayColumn*>(column.get());
+        uint32_t* offsets = array_cols->offsets_column().get()->get_data().data();
+
+        for (size_t i = 0; i < column->size(); ++i) {
+            array_orc_column.offsets[i + 1] = offsets[i];
+            array_orc_column.notNull[i] = 1;
+        }
+        RETURN_IF_ERROR(_write_column(value_orc_column, array_cols->elements_column(), type.children[0]));
+    }
+    array_orc_column.numElements = column->size();
+    return Status::OK();
 }
 
 
+Status OrcChunkWriter::_write_struct_column(orc::ColumnVectorBatch & orc_column, ColumnPtr& column, const TypeDescriptor& type) {
+    auto & struct_orc_column = dynamic_cast<orc::StructVectorBatch &>(orc_column);
+    struct_orc_column.resize(column->size());
+    struct_orc_column.notNull.resize(column->size());
+
+    if (column->is_nullable()) {
+        auto* col_nullable = down_cast<NullableColumn*>(column.get());
+        auto* struct_cols = down_cast<StructColumn*>(col_nullable->data_column().get()); 
+        auto* nulls = col_nullable->null_column()->get_data().data();
+        Columns& field_columns = struct_cols->fields_column();
+        
+        for (size_t i = 0; i < column->size(); ++i) {
+            struct_orc_column.notNull[i] = !nulls[i];
+        }
+
+        for (size_t i = 0; i < type.children.size(); ++i) {
+            RETURN_IF_ERROR(_write_column(*struct_orc_column.fields[i], field_columns[i], type.children[i]));
+        }
+        struct_orc_column.hasNulls = true;
+    } else {
+        auto* struct_cols = down_cast<StructColumn*>(column.get());
+        Columns& field_columns = struct_cols->fields_column();
+
+        for (size_t i = 0; i < column->size(); ++i) {
+            struct_orc_column.notNull[i] = 1;
+        }
+
+        for (size_t i = 0; i < type.children.size(); ++i) {
+            RETURN_IF_ERROR(_write_column(*struct_orc_column.fields[i], field_columns[i], type.children[i]));
+        }
+    }
+    struct_orc_column.numElements = column->size();
+    return Status::OK();
+}
+
+Status OrcChunkWriter::_write_map_column(orc::ColumnVectorBatch & orc_column, ColumnPtr& column, const TypeDescriptor& type) {
+    auto & map_orc_column = dynamic_cast<orc::MapVectorBatch &>(orc_column);
+    orc::ColumnVectorBatch & keys_orc_column = *map_orc_column.keys;
+    orc::ColumnVectorBatch & values_orc_column = *map_orc_column.elements;
+
+    if (column->is_nullable()) {
+        auto* col_nullable = down_cast<NullableColumn*>(column.get());
+        auto* col_map = down_cast<MapColumn*>(col_nullable->data_column().get());
+        uint32_t* offsets = col_map->offsets_column().get()->get_data().data();
+        auto* nulls = col_nullable->null_column()->get_data().data();
+        
+        ColumnPtr& keys = col_map->keys_column();
+        ColumnPtr& values = col_map->values_column();
+        size_t column_size = column->size();
+
+        map_orc_column.resize(column_size);
+        map_orc_column.offsets[0] = 0;
+
+        for (size_t i = 0; i < column_size; ++i)
+        {
+            map_orc_column.offsets[i+1] = offsets[i+1];
+            map_orc_column.notNull[i] = !nulls[i];
+        }
+
+        RETURN_IF_ERROR(_write_column(keys_orc_column, keys, type.children[0]));
+        RETURN_IF_ERROR(_write_column(values_orc_column, values, type.children[1]));
+        map_orc_column.hasNulls = true; 
+    } else {
+        auto* col_map = down_cast<MapColumn*>(column.get());
+        uint32_t* offsets = col_map->offsets_column().get()->get_data().data();
+
+        ColumnPtr& keys = col_map->keys_column();
+        ColumnPtr& values = col_map->values_column();
+        size_t column_size = column->size();
+
+        for (size_t i = 0; i < column_size; ++i)
+        {
+            map_orc_column.offsets[i+1] = offsets[i+1];
+            map_orc_column.notNull[i] = 1;
+        }
+
+        RETURN_IF_ERROR(_write_column(keys_orc_column, keys, type.children[0]));
+        RETURN_IF_ERROR(_write_column(keys_orc_column, keys, type.children[1]));
+    }
+    map_orc_column.numElements = column->size();
+    return Status::OK();
+}
 
 void OrcChunkWriter::close() {
     _writer->close();
 }
 
-std::unique_ptr<orc::Type> OrcBuildHelper::make_schema(
-            const std::vector<std::string>& file_column_names, const std::vector<TypeDescriptor>& type_descs) {
+StatusOr<std::unique_ptr<orc::Type>> OrcChunkWriter::make_schema(const std::vector<std::string>& file_column_names, const std::vector<TypeDescriptor>& type_descs) {
     auto schema = orc::createStructType();
     for (size_t i = 0; i < type_descs.size(); ++i) {
-        switch (type_descs[i].type) {
-            CREATE_ORC_PRIMITIVE_TYPE(TYPE_BOOLEAN, orc::TypeKind::BOOLEAN);
-            CREATE_ORC_PRIMITIVE_TYPE(TYPE_TINYINT, orc::TypeKind::BYTE);
-            CREATE_ORC_PRIMITIVE_TYPE(TYPE_UNSIGNED_TINYINT, orc::TypeKind::BYTE);
-            CREATE_ORC_PRIMITIVE_TYPE(TYPE_SMALLINT, orc::TypeKind::SHORT);
-            CREATE_ORC_PRIMITIVE_TYPE(TYPE_UNSIGNED_SMALLINT, orc::TypeKind::SHORT);
-            CREATE_ORC_PRIMITIVE_TYPE(TYPE_INT, orc::TypeKind::INT);
-            CREATE_ORC_PRIMITIVE_TYPE(TYPE_UNSIGNED_INT, orc::TypeKind::INT);
-            CREATE_ORC_PRIMITIVE_TYPE(TYPE_BIGINT, orc::TypeKind::LONG);
-            CREATE_ORC_PRIMITIVE_TYPE(TYPE_LARGEINT, orc::TypeKind::LONG);
-            CREATE_ORC_PRIMITIVE_TYPE(TYPE_FLOAT, orc::TypeKind::FLOAT);
-            CREATE_ORC_PRIMITIVE_TYPE(TYPE_DISCRETE_DOUBLE, orc::TypeKind::DOUBLE);
-            CREATE_ORC_PRIMITIVE_TYPE(TYPE_DOUBLE, orc::TypeKind::DOUBLE);
-            CREATE_ORC_PRIMITIVE_TYPE(TYPE_CHAR, orc::TypeKind::STRING);
-            CREATE_ORC_PRIMITIVE_TYPE(TYPE_BINARY, orc::TypeKind::BINARY);
-            CREATE_ORC_PRIMITIVE_TYPE(TYPE_DATE, orc::TypeKind::DATE);
-            CREATE_ORC_PRIMITIVE_TYPE(TYPE_VARCHAR, orc::TypeKind::STRING);
-            case TYPE_DECIMAL:
-            {
-                std::unique_ptr<orc::Type> field_type = orc::createDecimalType(type_descs[i].precision, type_descs[i].scale);
-                schema->addStructField(file_column_names[i], std::move(field_type));
-            }
-            break;
-            default:
-            {
-                // throw Exception(ErrorCodes::ILLEGAL_COLUMN, "Type {} is not supported for ORC output format", type->getName());
-            }
-        }
+        ASSIGN_OR_RETURN(
+                    std::unique_ptr<orc::Type> field_type,
+                    OrcChunkWriter::_get_orc_type(type_descs[i]));
+
+        schema->addStructField(file_column_names[i], std::move(field_type));
     }
     return schema;
 }

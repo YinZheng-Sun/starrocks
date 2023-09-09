@@ -29,6 +29,7 @@
 #include "formats/orc/column_writer.h"
 #include "runtime/descriptors.h"
 #include "runtime/types.h"
+#include "formats/orc/utils.h"
 
 namespace starrocks {
 
@@ -59,44 +60,54 @@ private:
 
 class OrcBuildHelper {
 public:
-    static std::unique_ptr<orc::Type> make_schema(
+    static StatusOr<std::unique_ptr<orc::Type>> make_schema(
             const std::vector<std::string>& file_column_names, const std::vector<TypeDescriptor>& type_descs);
 
 private:
 
 };
 
-
 class OrcChunkWriter {
 public:
     OrcChunkWriter(std::vector<TypeDescriptor>& type_descs, OrcOutputStream *output_stream, std::unique_ptr<orc::Type> schema) : _schema(std::move(schema)), _type_descs(type_descs), _output_stream(output_stream) {};
-    
-    Status init_writer();
-    
-    void set_compression(const TCompressionType::type& compression_type);
+        
+    Status set_compression(const TCompressionType::type& compression_type);
 
     Status write(Chunk* chunk);
 
     void close();
 
-private:
-    // Status _make_schema();
-    // Status _init_column_writers();
-    
-    void _write_column(orc::ColumnVectorBatch& orc_column, ColumnPtr& column, TypeDescriptor& type_desc);
-    
-    
-    // template <typename NumberType, typename NumberVectorBatch, typename ConvertFunc>
-    template <LogicalType Type, typename VectorBatchType, typename ConvertFunc>
-    void _write_numbers(orc::ColumnVectorBatch & orc_column, ColumnPtr& column, ConvertFunc convert);
+    static StatusOr<std::unique_ptr<orc::Type>> make_schema(
+            const std::vector<std::string>& file_column_names, const std::vector<TypeDescriptor>& type_descs);
 
-    // template <LogicalType Type>
+private:
+
+    static StatusOr<std::unique_ptr<orc::Type>> _get_orc_type(const TypeDescriptor& type_desc);
+
+    Status _write_column(orc::ColumnVectorBatch& orc_column, ColumnPtr& column, const TypeDescriptor& type_desc);
+    
+
+    template <LogicalType Type, typename VectorBatchType>
+    void _write_numbers(orc::ColumnVectorBatch & orc_column, ColumnPtr& column);
+
     void _write_strings(orc::ColumnVectorBatch & orc_column, ColumnPtr& column);
 
     template <LogicalType DecimalType, typename ConvertFunc>
     void _write_decimals(orc::ColumnVectorBatch & orc_column, ColumnPtr& column, ConvertFunc convert, int precision, int scale);
 
+    template <LogicalType DecimalType, typename VectorBatchType, typename T>
+    void _write_decimal32or64or128(orc::ColumnVectorBatch & orc_column, ColumnPtr& column, int precision, int scale);
 
+    void _write_datetimes(orc::ColumnVectorBatch & orc_column, ColumnPtr& column);
+
+    void _write_timestamps(orc::ColumnVectorBatch & orc_column, ColumnPtr& column);
+
+    Status _write_array_column(orc::ColumnVectorBatch & orc_column, ColumnPtr& column, const TypeDescriptor& type);
+
+    Status _write_struct_column(orc::ColumnVectorBatch & orc_column, ColumnPtr& column, const TypeDescriptor& type);
+    
+    Status _write_map_column(orc::ColumnVectorBatch & orc_column, ColumnPtr& column, const TypeDescriptor& type);
+    
     
     std::unique_ptr<orc::Writer> _writer;               //负责将数据写入到buffer
     std::vector<TypeDescriptor> _type_descs;            //chunk中各个列的type信息
