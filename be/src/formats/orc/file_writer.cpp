@@ -1,21 +1,21 @@
-// // Copyright 2023-present StarRocks, Inc. All rights reserved.
-// //
-// // Licensed under the Apache License, Version 2.0 (the "License");
-// // you may not use this file except in compliance with the License.
-// // You may obtain a copy of the License at
-// //
-// //     https://www.apache.org/licenses/LICENSE-2.0
-// //
-// // Unless required by applicable law or agreed to in writing, software
-// // distributed under the License is distributed on an "AS IS" BASIS,
-// // WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// // See the License for the specific language governing permissions and
-// // limitations under the License.
+// Copyright 2023-present StarRocks, Inc. All rights reserved.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     https://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
-// #include "formats/orc/file_writer.h"
+#include "formats/orc/file_writer.h"
 
 
-// namespace starrocks::orc {
+namespace starrocks::orc {
 
 // /*
 // ** ORCOutputStream
@@ -80,15 +80,14 @@
 //     };
 // }
 
-// // UT
-// FileWriterBase::FileWriterBase(std::unique_ptr<WritableFile> writable_file,
-//                                std::shared_ptr<orc::WriterOptions> options,
-//                                std::shared_ptr<orc::Type> schema,
-//                                std::vector<TypeDescriptor> type_descs)
-//         : _options(std::move(options)), _schema(std::move(schema)), _type_descs(std::move(type_descs)) {
-//     _outstream = std::make_shared<OrcOutputStream>(std::move(writable_file));
-//     _eval_func = [](Chunk* chunk, size_t col_idx) { return chunk->get_column_by_index(col_idx); };
-// }
+// UT
+FileWriterBase::FileWriterBase(std::unique_ptr<WritableFile> writable_file,
+                               std::shared_ptr<::orc::WriterOptions> options,
+                               std::shared_ptr<::orc::Type> schema,
+                               std::vector<TypeDescriptor> type_descs)
+        : _options(std::move(options)), _schema(std::move(schema)), _type_descs(std::move(type_descs)) {
+    _outstream = std::make_shared<OrcOutputStream>(std::move(writable_file));
+}
 
 // Status FileWriterBase::init() {
 //     _chunk_writer = std::make_unique<OrcChunkWriter>(_type_descs, _outstream);
@@ -101,4 +100,4 @@
 // //     // _chunk_writer->write
 // // }
 
-// }
+}

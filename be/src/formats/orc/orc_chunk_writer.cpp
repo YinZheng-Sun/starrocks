@@ -101,7 +101,7 @@ Status OrcChunkWriter::set_compression(const TCompressionType::type& compression
         break;
     }
     default:
-        return Status::InternalError("The Compression Type Not Supported");
+        return Status::InternalError("The Compression Type is not supported");
     }
     return Status::OK();
 }
@@ -368,7 +368,9 @@ void OrcChunkWriter::_write_decimal32or64or128(orc::ColumnVectorBatch & orc_colu
             T value;
             DecimalV3Cast::to_decimal_trivial<Type, T, false>(values[i], &value);
             if constexpr (std::is_same_v<T, int128_t>) {
-                decimal_orc_column.values[i] = orc::Int128{value >> 64, (value << 64) >> 64};
+                auto high64Bits = static_cast<int64_t>(value >> 64);
+                auto low64Bits = static_cast<uint64_t>(value);
+                decimal_orc_column.values[i] = orc::Int128{high64Bits, low64Bits};
             } else {
                 decimal_orc_column.values[i] = value;
             }
@@ -381,7 +383,9 @@ void OrcChunkWriter::_write_decimal32or64or128(orc::ColumnVectorBatch & orc_colu
             T value;
             DecimalV3Cast::to_decimal_trivial<Type, T, false>(values[i], &value);
             if constexpr (std::is_same_v<T, int128_t>) {
-                decimal_orc_column.values[i] = orc::Int128{value >> 64, (value << 64) >> 64};
+                int64_t high64Bits = static_cast<int64_t>(value >> 64);
+                uint64_t low64Bits = static_cast<uint64_t>(originvaluealValue);
+                decimal_orc_column.values[i] = orc::Int128{high64Bits, low64Bits};
             } else {
                 decimal_orc_column.values[i] = value;
             }
@@ -614,4 +618,14 @@ StatusOr<std::unique_ptr<orc::Type>> OrcChunkWriter::make_schema(const std::vect
     }
     return schema;
 }
+
+/*
+** AsyncOrcChunkWriter
+*/
+
+Status AsyncOrcChunkWriter::close(RuntimeState* state,
+                 const std::function<void(starrocks::AsyncOrcChunkWriter*, RuntimeState*)>& cb = nullptr) {
+    
+}
+
 } // namespace starrocks
