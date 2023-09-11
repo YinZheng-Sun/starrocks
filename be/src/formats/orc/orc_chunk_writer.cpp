@@ -50,25 +50,23 @@ const std::string& OrcOutputStream::getName() const {
 void OrcOutputStream::write(const void* buf, size_t length)
 {
     if (_is_closed) {
-        LOG(WARNING) << "The output stream is closed but there are still inputs";
-        return;
+        throw "The output stream is closed but there are still inputs";
     }
     const char* ch = reinterpret_cast<const char*>(buf);
     Status st = _wfile->append(Slice(ch, length));
     if (!st.ok()) {
-        LOG(WARNING) << "write to orc output stream failed: " << st;
+        throw "write to orc failed: " + st.to_string();
     }
     return;
 }
 
 void OrcOutputStream::close() {
     if (_is_closed) {
-        return;
+        throw "The output stream is already closed";
     }
     Status st = _wfile->close();
     if (!st.ok()) {
-        LOG(WARNING) << "close orc output stream failed: " << st;
-        return;
+        throw "close orc output stream failed: " + st.to_string();
     }
     _is_closed = true;
     return;
@@ -189,17 +187,27 @@ Status OrcChunkWriter::write(Chunk* chunk) {
     size_t column_size = chunk->num_columns();
 
     auto columns = chunk->columns();
-
-    std::unique_ptr<orc::ColumnVectorBatch> batch = _writer->createRowBatch(config::vector_chunk_size);
+    
+    _batch = _writer->createRowBatch(config::vector_chunk_size);
     orc::StructVectorBatch & root = dynamic_cast<orc::StructVectorBatch &>(*batch);
-    Status st;
 
     for (size_t i = 0; i < column_size; ++i) {
         RETURN_IF_ERROR(_write_column(*root.fields[i], columns[i], _type_descs[i]));
     }
 
     root.numElements = num_rows;
-    _writer->add(*batch);
+    RETURN_IF_ERROR(_flush_batch());
+    return Status::OK();
+}
+
+Status OrcChunkWriter::_flush_batch() {
+    if (!_writer) {
+        return Status::InternalError("ORC Writer is not inited");
+    }
+    if (!_batch) {
+        return Status::InternalError("ORC Batch is empty");
+    }
+    _writer->add(*_batch);
     return Status::OK();
 }
 
@@ -613,7 +621,6 @@ StatusOr<std::unique_ptr<orc::Type>> OrcChunkWriter::make_schema(const std::vect
         ASSIGN_OR_RETURN(
                     std::unique_ptr<orc::Type> field_type,
                     OrcChunkWriter::_get_orc_type(type_descs[i]));
-
         schema->addStructField(file_column_names[i], std::move(field_type));
     }
     return schema;
@@ -622,10 +629,63 @@ StatusOr<std::unique_ptr<orc::Type>> OrcChunkWriter::make_schema(const std::vect
 /*
 ** AsyncOrcChunkWriter
 */
+Status AsyncOrcChunkWriter::_flush_batch() {
+    {
+        auto lock = std::unique_lock(_lock);
+        _batch_closing = true;
+    }
+
+    bool finish = _executor_pool->try_offer([&]() {
+        SCOPED_TIMER(_io_timer);
+        if (_batch != nullptr) {
+            _writer->add(*_batch);
+            _batch = nullptr;
+        }
+        {
+            auto lock = std::unique_lock(_lock);
+            _batch_closing = false;
+        }
+        _cv.notify_one();
+    });
+
+    if (!finish) {
+        {
+            auto lock = std::unique_lock(_m);
+            _batch_closing = false;
+        }
+        _cv.notify_one();
+        auto st = Status::ResourceBusy("submit flush batch task fails");
+        LOG(WARNING) << st;
+        return st;
+    }
+    return Status::OK();
+}
+
 
 Status AsyncOrcChunkWriter::close(RuntimeState* state,
                  const std::function<void(starrocks::AsyncOrcChunkWriter*, RuntimeState*)>& cb = nullptr) {
-    
+    auto lock = std::unique_lock(_m);
+    _batch_closing = true;
+    bool ret = _executor_pool->try_offer([&, state, cb]() {
+        SCOPED_TIMER(_io_timer);
+        {
+            auto lock = std::unique_lock(_m);
+            _cv.wait(lock, [&] { return !_batch_closing; });
+        }
+        _writer->close();
+        _batch = nullptr;
+        if (cb != nullptr) {
+            cb(this, state);
+        }
+        _closed.store(true);
+        return Status::OK();
+    });
+
+    if (ret) {
+        return Status::OK();
+    }
+    return Status::InternalError("Submit close file error");
 }
+
 
 } // namespace starrocks

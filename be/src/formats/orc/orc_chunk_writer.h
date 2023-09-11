@@ -83,6 +83,8 @@ public:
 
 private:
 
+    virtual Status _flush_batch();
+
     static StatusOr<std::unique_ptr<orc::Type>> _get_orc_type(const TypeDescriptor& type_desc);
 
     Status _write_column(orc::ColumnVectorBatch& orc_column, ColumnPtr& column, const TypeDescriptor& type_desc);
@@ -116,6 +118,7 @@ protected:
     std::vector<TypeDescriptor> _type_descs;            //chunk中各个列的type信息
     orc::WriterOptions _writer_options;                 //用于配置写入的参数，如压缩算法，压缩等级等
     std::unique_ptr<orc::Type>  _schema;                //维护表的schema
+    std::unique_ptr<orc::ColumnVectorBatch> _batch;
     OrcOutputStream* _output_stream;
 };
 
@@ -129,6 +132,7 @@ public:
                  _parent_profile(parent_profile) {
         _io_timer = ADD_TIMER(_parent_profile, "OrcChunkWriterIoTimer");
     };
+    Status _flush_batch() override;
 
     Status close(RuntimeState* state,
                  const std::function<void(starrocks::AsyncOrcChunkWriter*, RuntimeState*)>& cb = nullptr);
