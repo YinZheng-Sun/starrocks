@@ -134,13 +134,9 @@ public:
     };
     Status _flush_batch() override;
 
-    Status close(RuntimeState* state,
-                 const std::function<void(starrocks::AsyncOrcChunkWriter*, RuntimeState*)>& cb = nullptr);
+    Status close(RuntimeState* state, const std::function<void(AsyncOrcChunkWriter*, RuntimeState*)>& cb = nullptr);
 
-    bool writable() {
-        auto lock = std::unique_lock(_lock);
-        return !_batch_closing;
-    }
+    bool writable();
 
     bool closed() { return _closed.load(); }
 

@@ -187,9 +187,9 @@ Status OrcChunkWriter::write(Chunk* chunk) {
     size_t column_size = chunk->num_columns();
 
     auto columns = chunk->columns();
-    
+
     _batch = _writer->createRowBatch(config::vector_chunk_size);
-    orc::StructVectorBatch & root = dynamic_cast<orc::StructVectorBatch &>(*batch);
+    orc::StructVectorBatch & root = dynamic_cast<orc::StructVectorBatch &>(*_batch);
 
     for (size_t i = 0; i < column_size; ++i) {
         RETURN_IF_ERROR(_write_column(*root.fields[i], columns[i], _type_descs[i]));
@@ -392,7 +392,7 @@ void OrcChunkWriter::_write_decimal32or64or128(orc::ColumnVectorBatch & orc_colu
             DecimalV3Cast::to_decimal_trivial<Type, T, false>(values[i], &value);
             if constexpr (std::is_same_v<T, int128_t>) {
                 int64_t high64Bits = static_cast<int64_t>(value >> 64);
-                uint64_t low64Bits = static_cast<uint64_t>(originvaluealValue);
+                uint64_t low64Bits = static_cast<uint64_t>(value);
                 decimal_orc_column.values[i] = orc::Int128{high64Bits, low64Bits};
             } else {
                 decimal_orc_column.values[i] = value;
@@ -605,7 +605,7 @@ Status OrcChunkWriter::_write_map_column(orc::ColumnVectorBatch & orc_column, Co
         }
 
         RETURN_IF_ERROR(_write_column(keys_orc_column, keys, type.children[0]));
-        RETURN_IF_ERROR(_write_column(keys_orc_column, keys, type.children[1]));
+        RETURN_IF_ERROR(_write_column(values_orc_column, values, type.children[1]));
     }
     map_orc_column.numElements = column->size();
     return Status::OK();
@@ -650,12 +650,11 @@ Status AsyncOrcChunkWriter::_flush_batch() {
 
     if (!finish) {
         {
-            auto lock = std::unique_lock(_m);
+            auto lock = std::unique_lock(_lock);
             _batch_closing = false;
         }
         _cv.notify_one();
         auto st = Status::ResourceBusy("submit flush batch task fails");
-        LOG(WARNING) << st;
         return st;
     }
     return Status::OK();
@@ -663,13 +662,11 @@ Status AsyncOrcChunkWriter::_flush_batch() {
 
 
 Status AsyncOrcChunkWriter::close(RuntimeState* state,
-                 const std::function<void(starrocks::AsyncOrcChunkWriter*, RuntimeState*)>& cb = nullptr) {
-    auto lock = std::unique_lock(_m);
-    _batch_closing = true;
+                                  const std::function<void(AsyncOrcChunkWriter*, RuntimeState*)>& cb) {
     bool ret = _executor_pool->try_offer([&, state, cb]() {
         SCOPED_TIMER(_io_timer);
-        {
-            auto lock = std::unique_lock(_m);
+        { 
+            auto lock = std::unique_lock(_lock);
             _cv.wait(lock, [&] { return !_batch_closing; });
         }
         _writer->close();
@@ -681,11 +678,15 @@ Status AsyncOrcChunkWriter::close(RuntimeState* state,
         return Status::OK();
     });
 
-    if (ret) {
-        return Status::OK();
+    if (!ret) {
+        return Status::InternalError("Submit close file error");
     }
-    return Status::InternalError("Submit close file error");
+    return Status::OK();
 }
 
+bool AsyncOrcChunkWriter::writable() {
+    auto lock = std::unique_lock(_lock);
+    return !_batch_closing;
+}
 
 } // namespace starrocks
