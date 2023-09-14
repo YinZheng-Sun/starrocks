@@ -1,4 +1,4 @@
-// Copyright 2023-present StarRocks, Inc. All rights reserved.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -70,13 +70,19 @@ private:
 
 class OrcChunkWriter {
 public:
-    OrcChunkWriter(std::vector<TypeDescriptor>& type_descs, OrcOutputStream *output_stream, std::unique_ptr<orc::Type> schema) : _type_descs(type_descs), _schema(std::move(schema)), _output_stream(output_stream) {};
+    OrcChunkWriter(std::unique_ptr<WritableFile> writable_file, std::shared_ptr<orc::WriterOptions> writer_options, std::shared_ptr<orc::Type> schema,
+                   const std::vector<ExprContext*>& output_expr_ctxs);
+
+    // UT
+    OrcChunkWriter(std::unique_ptr<WritableFile> writable_file, std::shared_ptr<orc::WriterOptions> writer_options, std::vector<TypeDescriptor>& type_descs, std::unique_ptr<orc::Type> schema) : _type_descs(type_descs), _writer_options(writer_options), _schema(std::move(schema)), _output_stream(std::move(writable_file)) {};
         
     Status set_compression(const TCompressionType::type& compression_type);
 
     Status write(Chunk* chunk);
 
     void close();
+
+    size_t file_size() { return _output_stream.getLength(); };
 
     static StatusOr<std::unique_ptr<orc::Type>> make_schema(
             const std::vector<std::string>& file_column_names, const std::vector<TypeDescriptor>& type_descs);
@@ -89,7 +95,6 @@ private:
 
     Status _write_column(orc::ColumnVectorBatch& orc_column, ColumnPtr& column, const TypeDescriptor& type_desc);
     
-
     template <LogicalType Type, typename VectorBatchType>
     void _write_numbers(orc::ColumnVectorBatch & orc_column, ColumnPtr& column);
 
@@ -116,23 +121,23 @@ protected:
 
     std::unique_ptr<orc::Writer> _writer;               //负责将数据写入到buffer
     std::vector<TypeDescriptor> _type_descs;            //chunk中各个列的type信息
-    orc::WriterOptions _writer_options;                 //用于配置写入的参数，如压缩算法，压缩等级等
-    std::unique_ptr<orc::Type>  _schema;                //维护表的schema
-    std::unique_ptr<orc::ColumnVectorBatch> _batch;
-    OrcOutputStream* _output_stream;
+    std::shared_ptr<orc::WriterOptions> _writer_options;//用于配置写入的参数，如压缩算法，压缩等级等
+    std::shared_ptr<orc::Type>  _schema;                //维护表的schema
+    std::unique_ptr<orc::ColumnVectorBatch> _batch = nullptr;
+    OrcOutputStream _output_stream;
 };
 
 
 class AsyncOrcChunkWriter : public OrcChunkWriter {
 public:
-    AsyncOrcChunkWriter(std::vector<TypeDescriptor> & type_descs, OrcOutputStream *output_stream, std::unique_ptr<orc::Type> schema,
+    AsyncOrcChunkWriter(std::unique_ptr<WritableFile> writable_file, std::shared_ptr<orc::WriterOptions> writer_options, std::shared_ptr<orc::Type> schema,
+                        const std::vector<ExprContext*>& output_expr_ctxs,
                         PriorityThreadPool* executor_pool,RuntimeProfile* parent_profile) 
-             : OrcChunkWriter(type_descs, output_stream, std::move(schema)),
+             : OrcChunkWriter(std::move(writable_file), writer_options, schema, output_expr_ctxs),
                  _executor_pool(executor_pool),
                  _parent_profile(parent_profile) {
         _io_timer = ADD_TIMER(_parent_profile, "OrcChunkWriterIoTimer");
     };
-    Status _flush_batch() override;
 
     Status close(RuntimeState* state, const std::function<void(AsyncOrcChunkWriter*, RuntimeState*)>& cb = nullptr);
 
@@ -141,6 +146,8 @@ public:
     bool closed() { return _closed.load(); }
 
 private:
+    Status _flush_batch() override;
+
     std::atomic<bool> _closed = false;
 
     PriorityThreadPool* _executor_pool;

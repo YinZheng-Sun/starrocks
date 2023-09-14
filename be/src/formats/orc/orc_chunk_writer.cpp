@@ -1,4 +1,4 @@
-// Copyright 2023-present StarRocks, Inc. All rights reserved.
+// Copyright 2021-present StarRocks, Inc. All rights reserved.
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -47,7 +47,7 @@ const std::string& OrcOutputStream::getName() const {
     return _wfile->filename();
 }
 
-void OrcOutputStream::write(const void* buf, size_t length)
+void OrcOutputStream::write(const void*  buf, size_t length)
 {
     if (_is_closed) {
         throw "The output stream is closed but there are still inputs";
@@ -72,30 +72,43 @@ void OrcOutputStream::close() {
     return;
 }
 
+OrcChunkWriter::OrcChunkWriter(std::unique_ptr<WritableFile> writable_file,
+                                std::shared_ptr<orc::WriterOptions> writer_options,
+                                std::shared_ptr<orc::Type> schema,
+                                const std::vector<ExprContext*>& output_expr_ctxs) : _output_stream(std::move(writable_file)){
+    _type_descs.reserve(output_expr_ctxs.size());
+    for (auto expr : output_expr_ctxs) {
+        _type_descs.push_back(expr->root()->type());
+    }
+    _writer_options = writer_options;
+    _schema = schema;
+}
+
+
 Status OrcChunkWriter::set_compression(const TCompressionType::type& compression_type) {
     switch (compression_type) {
     case TCompressionType::SNAPPY: {
-        _writer_options.setCompression(orc::CompressionKind::CompressionKind_SNAPPY);
+        _writer_options->setCompression(orc::CompressionKind::CompressionKind_SNAPPY);
         break;
     }
     case TCompressionType::ZLIB: {
-        _writer_options.setCompression(orc::CompressionKind::CompressionKind_ZLIB);
+        _writer_options->setCompression(orc::CompressionKind::CompressionKind_ZLIB);
         break;
     }
     case TCompressionType::ZSTD: {
-        _writer_options.setCompression(orc::CompressionKind::CompressionKind_ZSTD);
+        _writer_options->setCompression(orc::CompressionKind::CompressionKind_ZSTD);
         break;
     }
     case TCompressionType::LZ4: {
-        _writer_options.setCompression(orc::CompressionKind::CompressionKind_LZ4);
+        _writer_options->setCompression(orc::CompressionKind::CompressionKind_LZ4);
         break;
     }
     case TCompressionType::LZO: {
-        _writer_options.setCompression(orc::CompressionKind::CompressionKind_LZO);
+        _writer_options->setCompression(orc::CompressionKind::CompressionKind_LZO);
         break;
     }
     case TCompressionType::NO_COMPRESSION: {
-        _writer_options.setCompression(orc::CompressionKind::CompressionKind_NONE);
+        _writer_options->setCompression(orc::CompressionKind::CompressionKind_NONE);
         break;
     }
     default:
@@ -178,10 +191,9 @@ StatusOr<std::unique_ptr<orc::Type>> OrcChunkWriter::_get_orc_type(const TypeDes
     }
 }
 
-
 Status OrcChunkWriter::write(Chunk* chunk) {
     if (!_writer) {
-        _writer = orc::createWriter(*_schema, _output_stream, _writer_options);
+        _writer = orc::createWriter(*_schema, &_output_stream, *_writer_options);
     }
     size_t num_rows = chunk->num_rows();
     size_t column_size = chunk->num_columns();
@@ -527,7 +539,6 @@ Status OrcChunkWriter::_write_array_column(orc::ColumnVectorBatch & orc_column, 
     return Status::OK();
 }
 
-
 Status OrcChunkWriter::_write_struct_column(orc::ColumnVectorBatch & orc_column, ColumnPtr& column, const TypeDescriptor& type) {
     auto & struct_orc_column = dynamic_cast<orc::StructVectorBatch &>(orc_column);
     struct_orc_column.resize(column->size());
@@ -659,7 +670,6 @@ Status AsyncOrcChunkWriter::_flush_batch() {
     }
     return Status::OK();
 }
-
 
 Status AsyncOrcChunkWriter::close(RuntimeState* state,
                                   const std::function<void(AsyncOrcChunkWriter*, RuntimeState*)>& cb) {
