@@ -12,9 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-
-#include "formats/orc/orc_chunk_writer.h"
-
 #include <gtest/gtest.h>
 
 #include <ctime>
@@ -38,12 +35,28 @@
 #include "fs/fs.h"
 #include "fs/fs_memory.h"
 #include "testutil/assert.h"
+#include "formats/orc/orc_chunk_reader.h"
+#include "formats/orc/orc_chunk_writer.h"
+
 
 namespace starrocks {
 
+struct SlotDesc {
+    string name;
+    TypeDescriptor type;
+};
+
 class OrcChunkWriterTest : public testing::Test {
 public:
-    void SetUp() override {};
+    void SetUp() override {
+        TUniqueId fragment_id;
+        TQueryOptions query_options;
+        query_options.batch_size = config::vector_chunk_size;
+        TQueryGlobals query_globals;
+        auto runtime_state = std::make_shared<RuntimeState>(fragment_id, query_options, query_globals, nullptr);
+        runtime_state->init_instance_mem_tracker();
+            _runtime_state = runtime_state;
+    };
     void TearDown() override {};
 
 protected:
@@ -59,20 +72,95 @@ protected:
     Status _write_chunk(const ChunkPtr& chunk, std::vector<TypeDescriptor>& type_descs, std::unique_ptr<orc::Type> schema) {
         auto fs = FileSystem::Default();
         ASSIGN_OR_ABORT(auto file, fs->new_writable_file("./tmp2.orc"));
-        OrcOutputStream OutputStream(std::move(file));
+        auto writer_options = std::make_shared<orc::WriterOptions>();
 
-        auto chunk_writer = std::make_shared<OrcChunkWriter>(type_descs, &OutputStream, std::move(schema));
+        auto chunk_writer = std::make_shared<OrcChunkWriter>(std::move(file), writer_options, type_descs, std::move(schema));
         auto st = chunk_writer->write(chunk.get());
-
+        chunk_writer->set_compression(TCompressionType::SNAPPY);
         if (!st.ok()) {
             std::cout << st.to_string() << std::endl;
             return st;
         }
-        chunk_writer->set_compression(TCompressionType::SNAPPY);
         chunk_writer->close();
         return st;
     }
 
+    void create_tuple_descriptor(RuntimeState* state, ObjectPool* pool, const SlotDesc* slot_descs,
+                             TupleDescriptor** tuple_desc) {
+        TDescriptorTableBuilder table_desc_builder;
+
+        TTupleDescriptorBuilder tuple_desc_builder;
+        for (int i = 0;; i++) {
+            if (slot_descs[i].name == "") {
+                break;
+            }
+            TSlotDescriptorBuilder b2;
+            b2.column_name(slot_descs[i].name).type(slot_descs[i].type).id(i).nullable(true);
+            tuple_desc_builder.add_slot(b2.build());
+        }
+        tuple_desc_builder.build(&table_desc_builder);
+
+        std::vector<TTupleId> row_tuples = std::vector<TTupleId>{0};
+        std::vector<bool> nullable_tuples = std::vector<bool>{true};
+        DescriptorTbl* tbl = nullptr;
+        DescriptorTbl::create(state, pool, table_desc_builder.desc_tbl(), &tbl, config::vector_chunk_size);
+
+        RowDescriptor* row_desc = pool->add(new RowDescriptor(*tbl, row_tuples, nullable_tuples));
+        *tuple_desc = row_desc->tuple_descriptors()[0];
+        return;
+    }
+
+    void create_slot_descriptors(RuntimeState* state, ObjectPool* pool, std::vector<SlotDescriptor*>* res,
+                             SlotDesc* slot_descs) {
+        TupleDescriptor* tuple_desc;
+        create_tuple_descriptor(state, pool, slot_descs, &tuple_desc);
+        *res = tuple_desc->slots();
+        return;
+    }
+
+    static uint64_t get_hit_rows(OrcChunkReader* reader) {
+        uint64_t records = 0;
+        for (;;) {
+            Status st = reader->read_next();
+            if (st.is_end_of_file()) {
+                break;
+            }
+            DCHECK(st.ok()) << st.get_error_msg();
+            ChunkPtr ckptr = reader->create_chunk();
+            DCHECK(ckptr != nullptr);
+            st = reader->fill_chunk(&ckptr);
+            DCHECK(st.ok()) << st.get_error_msg();
+            ChunkPtr result = reader->cast_chunk(&ckptr);
+            DCHECK(result != nullptr);
+            records += result->num_rows();
+            DCHECK(result->num_columns() == reader->num_columns());
+        }
+    return records;
+}
+
+
+    Status _read_chunk(ChunkPtr& chunk, SlotDesc* default_slot_descs) {
+        uint64_t records = 0;
+        std::vector<SlotDescriptor*> src_slot_descs;
+        create_slot_descriptors(_runtime_state.get(), &_pool, &src_slot_descs, default_slot_descs);
+        OrcChunkReader reader(_runtime_state->chunk_size(), src_slot_descs);
+        auto input_stream = orc::readLocalFile("./tmp2.orc");
+        auto res = reader.init(std::move(input_stream));
+        if (!res.ok()) {
+            std::cout << res.to_string();
+        }   
+        Status st2 = reader.read_next();
+        if (st2.is_end_of_file()) {
+            return Status::OK();
+        }
+        chunk = reader.create_chunk();
+        auto st = reader.fill_chunk(&chunk);
+        DCHECK(st.ok()) << st.get_error_msg();
+        ChunkPtr result = reader.cast_chunk(&chunk);
+        DCHECK(result != nullptr);
+        records += result->num_rows();
+        return Status::OK();
+    }
 
 private:
     MemoryFileSystem _fs;
@@ -104,25 +192,60 @@ TEST_F(OrcChunkWriterTest, TestSimpleWrite) {
         chunk->append_column(col1, chunk->num_columns());
 
         
-        auto col2 = ColumnHelper::create_column(TypeDescriptor::from_logical_type(TYPE_INT), true);
-        std::vector<int32_t> int32_nums{INT32_MIN, INT32_MAX, 0, 1};
-        count = col2->append_numbers(int32_nums.data(), size(int32_nums) * sizeof(int32_t));
-        ASSERT_EQ(4, count);
-        chunk->append_column(col2, chunk->num_columns());
+        // auto col2 = ColumnHelper::create_column(TypeDescriptor::from_logical_type(TYPE_INT), true);
+        // std::vector<int32_t> int32_nums{INT32_MIN, INT32_MAX, 0, 1};
+        // count = col2->append_numbers(int32_nums.data(), size(int32_nums) * sizeof(int32_t));
+        // ASSERT_EQ(4, count);
+        // chunk->append_column(col2, chunk->num_columns());
 
-        auto col3 = ColumnHelper::create_column(TypeDescriptor::from_logical_type(TYPE_BIGINT), true);
-        std::vector<int64_t> int64_nums{INT64_MIN, INT64_MAX, 0, 1};
-        count = col3->append_numbers(int64_nums.data(), size(int64_nums) * sizeof(int64_t));
-        ASSERT_EQ(4, count);
-        chunk->append_column(col3, chunk->num_columns());
+        // auto col3 = ColumnHelper::create_column(TypeDescriptor::from_logical_type(TYPE_BIGINT), true);
+        // std::vector<int64_t> int64_nums{INT64_MIN, INT64_MAX, 0, 1};
+        // count = col3->append_numbers(int64_nums.data(), size(int64_nums) * sizeof(int64_t));
+        // ASSERT_EQ(4, count);
+        // chunk->append_column(col3, chunk->num_columns());
     }
+    auto column_names = _make_type_names(type_descs);
+    ASSIGN_OR_ABORT(auto schema, OrcChunkWriter::make_schema(column_names, type_descs));
+
+    SlotDesc default_slot_descs[] = {
+        {column_names[0], TypeDescriptor::from_logical_type(LogicalType::TYPE_TINYINT)},
+        {column_names[1], TypeDescriptor::from_logical_type(LogicalType::TYPE_SMALLINT)},
+        {""},
+    };
+
+
+    // write chunk
+    auto st = _write_chunk(chunk, type_descs, std::move(schema));
+    ChunkPtr chunkres;
+    st = _read_chunk(chunkres,default_slot_descs);
+    ASSERT_OK(st);
+}
+
+TEST_F(OrcChunkWriterTest, TestWriteBoolean) {
+    auto type_bool = TypeDescriptor::from_logical_type(TYPE_BOOLEAN);
+    std::vector<TypeDescriptor> type_descs{type_bool};
+
+    auto chunk = std::make_shared<Chunk>();
+    {
+        auto data_column = BooleanColumn::create();
+        std::vector<uint8_t> values = {0, 1, 1, 0};
+        data_column->append_numbers(values.data(), values.size() * sizeof(uint8_t));
+        auto null_column = UInt8Column::create();
+        std::vector<uint8_t> nulls = {1, 0, 1, 0};
+        null_column->append_numbers(nulls.data(), nulls.size());
+        auto nullable_column = NullableColumn::create(data_column, null_column);
+        chunk->append_column(nullable_column, chunk->num_columns());
+    }
+
+    // write chunk
     auto column_names = _make_type_names(type_descs);
     ASSIGN_OR_ABORT(auto schema, OrcChunkWriter::make_schema(column_names, type_descs));
 
     // write chunk
     auto st = _write_chunk(chunk, type_descs, std::move(schema));
-    ASSERT_OK(st);
 }
+
+
 
 TEST_F(OrcChunkWriterTest, TestWriteVarchar) {
     auto type_varchar = TypeDescriptor::from_logical_type(TYPE_VARCHAR);

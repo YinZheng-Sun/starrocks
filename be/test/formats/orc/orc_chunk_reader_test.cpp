@@ -487,8 +487,10 @@ TEST_F(OrcChunkReaderTest, SkipRowGroups) {
     reader.set_row_reader_filter(filter);
 
     auto input_stream = orc::readLocalFile(default_orc_file);
-    reader.init(std::move(input_stream));
-
+    auto res = reader.init(std::move(input_stream));
+    if (!res.ok()) {
+        std::cout << res.to_string();
+    }
     uint64_t records = get_hit_rows(&reader);
     EXPECT_EQ(records, filter->expected_rows());
 }
