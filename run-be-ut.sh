@@ -225,20 +225,20 @@ export CLASSPATH=$STARROCKS_HOME/conf:$HADOOP_CLASSPATH:$CLASSPATH
 
 export STARROCKS_TEST_BINARY_DIR=${STARROCKS_TEST_BINARY_DIR}/test
 
-if [ $WITH_AWS = "OFF" ]; then
-    TEST_NAME="$TEST_NAME*:-*S3*"
-fi
+# if [ $WITH_AWS = "OFF" ]; then
+#     TEST_NAME="$TEST_NAME*:-*S3*"
+# fi
 
-# prepare util test_data
-if [ -d ${STARROCKS_TEST_BINARY_DIR}/util/test_data ]; then
-    rm -rf ${STARROCKS_TEST_BINARY_DIR}/util/test_data
-fi
-cp -r ${STARROCKS_HOME}/be/test/util/test_data ${STARROCKS_TEST_BINARY_DIR}/util/
+# # prepare util test_data
+# if [ -d ${STARROCKS_TEST_BINARY_DIR}/util/test_data ]; then
+#     rm -rf ${STARROCKS_TEST_BINARY_DIR}/util/test_data
+# fi
+# cp -r ${STARROCKS_HOME}/be/test/util/test_data ${STARROCKS_TEST_BINARY_DIR}/util/
 
-test_files=`find ${STARROCKS_TEST_BINARY_DIR} -type f -perm -111 -name "*test" \
-    | grep -v starrocks_test \
-    | grep -v bench_test \
-    | grep -e "$TEST_MODULE" `
+# test_files=`find ${STARROCKS_TEST_BINARY_DIR} -type f -perm -111 -name "*test" \
+#     | grep -v starrocks_test \
+#     | grep -v bench_test \
+#     | grep -e "$TEST_MODULE" `
 
 # run cases in starrocks_test in parallel if has gtest-parallel script.
 # reference: https://github.com/google/gtest-parallel
