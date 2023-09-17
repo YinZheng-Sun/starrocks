@@ -17,20 +17,16 @@
 
 #include <functional>
 
-#include "fs/fs.h"
 #include "column/column_helper.h"
 #include "column/vectorized_fwd.h"
-#include "common/object_pool.h"
 #include "exprs/expr.h"
 #include "exprs/expr_context.h"
-#include "exprs/runtime_filter_bank.h"
-#include "formats/orc/orc_mapping.h"
-#include "formats/orc/column_writer.h"
-#include "runtime/descriptors.h"
-#include "runtime/types.h"
 #include "formats/orc/utils.h"
-#include "util/priority_thread_pool.hpp"
+#include "fs/fs.h"
+#include "runtime/descriptors.h"
 #include "runtime/runtime_state.h"
+#include "runtime/types.h"
+#include "util/priority_thread_pool.hpp"
 
 namespace starrocks {
 
@@ -59,14 +55,11 @@ private:
     bool _is_closed = false;
 };
 
-class OrcBuildHelper {
-public:
-    static StatusOr<std::unique_ptr<orc::Type>> make_schema(
-            const std::vector<std::string>& file_column_names, const std::vector<TypeDescriptor>& type_descs);
-
-private:
-
-};
+// class OrcBuildHelper {
+// public:
+//     static StatusOr<std::unique_ptr<orc::Type>> make_schema(
+//             const std::vector<std::string>& file_column_names, const std::vector<TypeDescriptor>& type_descs);
+// };
 
 class OrcChunkWriter {
 public:
@@ -132,12 +125,7 @@ class AsyncOrcChunkWriter : public OrcChunkWriter {
 public:
     AsyncOrcChunkWriter(std::unique_ptr<WritableFile> writable_file, std::shared_ptr<orc::WriterOptions> writer_options, std::shared_ptr<orc::Type> schema,
                         const std::vector<ExprContext*>& output_expr_ctxs,
-                        PriorityThreadPool* executor_pool,RuntimeProfile* parent_profile) 
-             : OrcChunkWriter(std::move(writable_file), writer_options, schema, output_expr_ctxs),
-                 _executor_pool(executor_pool),
-                 _parent_profile(parent_profile) {
-        _io_timer = ADD_TIMER(_parent_profile, "OrcChunkWriterIoTimer");
-    };
+                        PriorityThreadPool* executor_pool, RuntimeProfile* parent_profile);
 
     Status close(RuntimeState* state, const std::function<void(AsyncOrcChunkWriter*, RuntimeState*)>& cb = nullptr);
 

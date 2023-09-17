@@ -12,39 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <gtest/gtest.h>
+#include "formats/orc/orc_chunk_writer.h"
 
+#include <gtest/gtest.h>
 #include <ctime>
 #include <filesystem>
+#include <iostream>
 #include <map>
 #include <vector>
-#include <iostream>
 
 #include "column/array_column.h"
+#include "column/map_column.h"
 #include "column/struct_column.h"
 #include "common/object_pool.h"
+#include "formats/orc/orc_chunk_reader.h"
+#include "fs/fs_posix.h"
 #include "gen_cpp/Exprs_types.h"
 #include "gutil/strings/substitute.h"
 #include "runtime/descriptor_helper.h"
 #include "runtime/descriptors.h"
-#include "column/map_column.h"
 #include "runtime/runtime_state.h"
-#include "orc_test_util/MemoryInputStream.hh"
-#include "orc_test_util/MemoryOutputStream.hh"
-#include "formats/orc/orc_chunk_writer.h"
-#include "fs/fs.h"
-#include "fs/fs_memory.h"
 #include "testutil/assert.h"
-#include "formats/orc/orc_chunk_reader.h"
-#include "formats/orc/orc_chunk_writer.h"
-
 
 namespace starrocks {
-
-struct SlotDesc {
-    string name;
-    TypeDescriptor type;
-};
 
 static void assert_equal_chunk(const Chunk* expected, const Chunk* actual) {
     if (expected->debug_columns() != actual->debug_columns()) {
@@ -54,7 +44,7 @@ static void assert_equal_chunk(const Chunk* expected, const Chunk* actual) {
     ASSERT_EQ(expected->debug_columns(), actual->debug_columns());
     for (size_t i = 0; i < expected->num_columns(); i++) {
         const auto& expected_col = expected->get_column_by_index(i);
-        const auto& actual_col = expected->get_column_by_index(i);
+        const auto& actual_col = actual->get_column_by_index(i);
         if (expected_col->debug_string() != actual_col->debug_string()) {
             std::cout << expected_col->debug_string() << std::endl;
             std::cout << actual_col->debug_string() << std::endl;
@@ -72,9 +62,12 @@ public:
         TQueryGlobals query_globals;
         auto runtime_state = std::make_shared<RuntimeState>(fragment_id, query_options, query_globals, nullptr);
         runtime_state->init_instance_mem_tracker();
-            _runtime_state = runtime_state;
+        _runtime_state = runtime_state;
+        _fs = new_fs_posix();
     };
-    void TearDown() override {};
+    void TearDown() override {
+        _fs->delete_file(_file_path);
+    };
 
 protected:
 
@@ -86,33 +79,14 @@ protected:
         return names;
     }
 
-    Status _write_chunk(const ChunkPtr& chunk, std::vector<TypeDescriptor>& type_descs, std::unique_ptr<orc::Type> schema) {
-        auto fs = FileSystem::Default();
-        ASSIGN_OR_ABORT(auto file, fs->new_writable_file("./tmp2.orc"));
-        auto writer_options = std::make_shared<orc::WriterOptions>();
-
-        auto chunk_writer = std::make_shared<OrcChunkWriter>(std::move(file), writer_options, type_descs, std::move(schema));
-        auto st = chunk_writer->write(chunk.get());
-        chunk_writer->set_compression(TCompressionType::SNAPPY);
-        if (!st.ok()) {
-            std::cout << st.to_string() << std::endl;
-            return st;
-        }
-        chunk_writer->close();
-        return st;
-    }
-
-    void create_tuple_descriptor(RuntimeState* state, ObjectPool* pool, const SlotDesc* slot_descs,
+    void _create_tuple_descriptor(RuntimeState* state, ObjectPool* pool, const std::vector<std::string>& column_names, const std::vector<TypeDescriptor>& type_descs,
                              TupleDescriptor** tuple_desc) {
         TDescriptorTableBuilder table_desc_builder;
 
         TTupleDescriptorBuilder tuple_desc_builder;
-        for (int i = 0;; i++) {
-            if (slot_descs[i].name == "") {
-                break;
-            }
+        for (size_t i = 0; i < column_names.size(); i++) {
             TSlotDescriptorBuilder b2;
-            b2.column_name(slot_descs[i].name).type(slot_descs[i].type).id(i).nullable(true);
+            b2.column_name(column_names[i]).type(type_descs[i]).id(i).nullable(true);
             tuple_desc_builder.add_slot(b2.build());
         }
         tuple_desc_builder.build(&table_desc_builder);
@@ -127,70 +101,60 @@ protected:
         return;
     }
 
-    void create_slot_descriptors(RuntimeState* state, ObjectPool* pool, std::vector<SlotDescriptor*>* res,
-                             SlotDesc* slot_descs) {
+    void _create_slot_descriptors(RuntimeState* state, ObjectPool* pool, std::vector<SlotDescriptor*>* res,
+                             const std::vector<std::string>& column_names, const std::vector<TypeDescriptor>& type_descs) {
         TupleDescriptor* tuple_desc;
-        create_tuple_descriptor(state, pool, slot_descs, &tuple_desc);
+        _create_tuple_descriptor(state, pool, column_names, type_descs, &tuple_desc);
         *res = tuple_desc->slots();
         return;
     }
+    
+    Status _write_chunk(const ChunkPtr& chunk, std::vector<TypeDescriptor>& type_descs, std::unique_ptr<orc::Type> schema) {
+        _fs->delete_file(_file_path);
+        ASSIGN_OR_ABORT(auto file, _fs->new_writable_file(_file_path));
+        auto writer_options = std::make_shared<orc::WriterOptions>();
 
-    static uint64_t get_hit_rows(OrcChunkReader* reader) {
-        uint64_t records = 0;
-        for (;;) {
-            Status st = reader->read_next();
-            if (st.is_end_of_file()) {
-                break;
-            }
-            DCHECK(st.ok()) << st.get_error_msg();
-            ChunkPtr ckptr = reader->create_chunk();
-            DCHECK(ckptr != nullptr);
-            st = reader->fill_chunk(&ckptr);
-            DCHECK(st.ok()) << st.get_error_msg();
-            ChunkPtr result = reader->cast_chunk(&ckptr);
-            DCHECK(result != nullptr);
-            records += result->num_rows();
-            DCHECK(result->num_columns() == reader->num_columns());
+        auto chunk_writer = std::make_shared<OrcChunkWriter>(std::move(file), writer_options, type_descs, std::move(schema));
+        auto st = chunk_writer->write(chunk.get());
+        if (!st.ok()) {
+            std::cout << st.to_string() << std::endl;
+            return st;
         }
-    return records;
-}
-
-
-    Status _read_chunk(ChunkPtr& chunk, SlotDesc* default_slot_descs) {
-        uint64_t records = 0;
+        chunk_writer->close();
+        return st;
+    }
+    
+    Status _read_chunk(ChunkPtr& chunk, const std::vector<std::string>& column_names, const std::vector<TypeDescriptor>& type_descs) {
         std::vector<SlotDescriptor*> src_slot_descs;
-        create_slot_descriptors(_runtime_state.get(), &_pool, &src_slot_descs, default_slot_descs);
+        _create_slot_descriptors(_runtime_state.get(), &_pool, &src_slot_descs, column_names, type_descs);
         OrcChunkReader reader(_runtime_state->chunk_size(), src_slot_descs);
-        auto input_stream = orc::readLocalFile("./tmp2.orc");
-        auto res = reader.init(std::move(input_stream));
+        auto input_stream = orc::readLocalFile(_file_path);
+        auto res = reader.init(std::move(input_stream));    
         if (!res.ok()) {
             std::cout << res.to_string();
         }   
-        Status st2 = reader.read_next();
-        if (st2.is_end_of_file()) {
-            return Status::OK();
-        }
-        auto chunk_read = reader.create_chunk();
-        auto st = reader.fill_chunk(&chunk_read);
+        auto st = reader.read_next();
         DCHECK(st.ok()) << st.get_error_msg();
+
+        auto chunk_read = reader.create_chunk();
+        st = reader.fill_chunk(&chunk_read);
+        DCHECK(st.ok()) << st.get_error_msg();
+        
         chunk = reader.cast_chunk(&chunk_read);
-        records += chunk->num_rows();
         return Status::OK();
     }
 
 private:
-    MemoryFileSystem _fs;
-    std::string _file_path{"./tmp.orc"};
+    std::unique_ptr<FileSystem> _fs;
+    std::string _file_path{"./be/test/exec/test_data/orc_scanner/tmp.orc"};
     ObjectPool _pool;
     std::shared_ptr<RuntimeState> _runtime_state;
 };
 
-TEST_F(OrcChunkWriterTest, TestSimpleWrite) {
+TEST_F(OrcChunkWriterTest, TestWriteIntergers) {
     std::vector<TypeDescriptor> type_descs{
             TypeDescriptor::from_logical_type(TYPE_TINYINT),
             TypeDescriptor::from_logical_type(TYPE_SMALLINT),
-            // TypeDescriptor::from_logical_type(TYPE_INT),
-            // TypeDescriptor::from_logical_type(TYPE_BIGINT),
     };
 
     auto chunk = std::make_shared<Chunk>();
@@ -207,35 +171,20 @@ TEST_F(OrcChunkWriterTest, TestSimpleWrite) {
         ASSERT_EQ(4, count);
         chunk->append_column(col1, chunk->num_columns());
 
-        
-        // auto col2 = ColumnHelper::create_column(TypeDescriptor::from_logical_type(TYPE_INT), true);
-        // std::vector<int32_t> int32_nums{INT32_MIN, INT32_MAX, 0, 1};
-        // count = col2->append_numbers(int32_nums.data(), size(int32_nums) * sizeof(int32_t));
-        // ASSERT_EQ(4, count);
-        // chunk->append_column(col2, chunk->num_columns());
-
-        // auto col3 = ColumnHelper::create_column(TypeDescriptor::from_logical_type(TYPE_BIGINT), true);
-        // std::vector<int64_t> int64_nums{INT64_MIN, INT64_MAX, 0, 1};
-        // count = col3->append_numbers(int64_nums.data(), size(int64_nums) * sizeof(int64_t));
-        // ASSERT_EQ(4, count);
-        // chunk->append_column(col3, chunk->num_columns());
     }
     auto column_names = _make_type_names(type_descs);
     ASSIGN_OR_ABORT(auto schema, OrcChunkWriter::make_schema(column_names, type_descs));
 
-    SlotDesc default_slot_descs[] = {
-        {column_names[0], TypeDescriptor::from_logical_type(LogicalType::TYPE_TINYINT)},
-        {column_names[1], TypeDescriptor::from_logical_type(LogicalType::TYPE_SMALLINT)},
-        {""},
-    };
-
-
     // write chunk
     auto st = _write_chunk(chunk, type_descs, std::move(schema));
     ASSERT_OK(st);
+
+    // read chunk
     ChunkPtr read_chunk;
-    st = _read_chunk(read_chunk, default_slot_descs);
+    st = _read_chunk(read_chunk, column_names, type_descs);
     ASSERT_OK(st);
+
+    // verify correctness
     assert_equal_chunk(chunk.get(), read_chunk.get());
 }
 
@@ -255,25 +204,21 @@ TEST_F(OrcChunkWriterTest, TestWriteBoolean) {
         chunk->append_column(nullable_column, chunk->num_columns());
     }
 
-    // write chunk
     auto column_names = _make_type_names(type_descs);
-
-    SlotDesc default_slot_descs[] = {
-        {column_names[0], type_bool},
-        {""},
-    };
-
     ASSIGN_OR_ABORT(auto schema, OrcChunkWriter::make_schema(column_names, type_descs));
 
     // write chunk
     auto st = _write_chunk(chunk, type_descs, std::move(schema));
-    ChunkPtr read_chunk;
-    st = _read_chunk(read_chunk,default_slot_descs);
     ASSERT_OK(st);
+
+    // read chunk
+    ChunkPtr read_chunk;
+    st = _read_chunk(read_chunk, column_names, type_descs);
+    ASSERT_OK(st);
+
+    // verify correctness
     assert_equal_chunk(chunk.get(), read_chunk.get());
 }
-
-
 
 TEST_F(OrcChunkWriterTest, TestWriteVarchar) {
     auto type_varchar = TypeDescriptor::from_logical_type(TYPE_VARCHAR);
@@ -296,18 +241,146 @@ TEST_F(OrcChunkWriterTest, TestWriteVarchar) {
 
     auto column_names = _make_type_names(type_descs);
 
-    SlotDesc default_slot_descs[] = {
-        {column_names[0], type_varchar},
-        {""},
-    };
 
     ASSIGN_OR_ABORT(auto schema, OrcChunkWriter::make_schema(column_names, type_descs));
 
     // write chunk
     auto st = _write_chunk(chunk, type_descs, std::move(schema));
-    ChunkPtr read_chunk;
-    st = _read_chunk(read_chunk, default_slot_descs);
     ASSERT_OK(st);
+
+    // read chunk
+    ChunkPtr read_chunk;
+    st = _read_chunk(read_chunk, column_names, type_descs);
+    ASSERT_OK(st);
+
+    // verify correctness
+    assert_equal_chunk(chunk.get(), read_chunk.get());
+}
+
+TEST_F(OrcChunkWriterTest, TestWriteDecimal) {
+    std::vector<TypeDescriptor> type_descs{
+            TypeDescriptor::create_decimalv3_type(TYPE_DECIMAL32, 9, 5),
+            TypeDescriptor::create_decimalv3_type(TYPE_DECIMAL64, 18, 9),
+            TypeDescriptor::create_decimalv3_type(TYPE_DECIMAL128, 20, 10),
+    };
+
+    auto chunk = std::make_shared<Chunk>();
+    {
+        auto col0 = ColumnHelper::create_column(type_descs[0], true);
+        std::vector<int32_t> int32_nums{INT32_MIN, INT32_MAX, 0, 1};
+        auto count = col0->append_numbers(int32_nums.data(), size(int32_nums) * sizeof(int32_t));
+        ASSERT_EQ(4, count);
+        chunk->append_column(col0, chunk->num_columns());
+
+        auto col1 = ColumnHelper::create_column(type_descs[1], true);
+        std::vector<int64_t> int64_nums{INT64_MIN, INT64_MAX, 0, 1};
+        count = col1->append_numbers(int64_nums.data(), size(int64_nums) * sizeof(int64_t));
+        ASSERT_EQ(4, count);
+        chunk->append_column(col1, chunk->num_columns());
+
+        auto col2 = ColumnHelper::create_column(type_descs[2], true);
+        std::vector<int128_t> int128_nums{INT64_MIN, INT64_MAX, 0, 1};
+        count = col2->append_numbers(int128_nums.data(), size(int128_nums) * sizeof(int128_t));
+        ASSERT_EQ(4, count);
+        chunk->append_column(col2, chunk->num_columns());
+    }
+
+    auto column_names = _make_type_names(type_descs);
+    ASSIGN_OR_ABORT(auto schema, OrcChunkWriter::make_schema(column_names, type_descs));
+
+    // write chunk
+    auto st = _write_chunk(chunk, type_descs, std::move(schema));
+    ASSERT_OK(st);
+
+    // read chunk
+    ChunkPtr read_chunk;
+    st = _read_chunk(read_chunk, column_names, type_descs);
+    ASSERT_OK(st);
+
+    // verify correctness
+    assert_equal_chunk(chunk.get(), read_chunk.get());
+}
+
+TEST_F(OrcChunkWriterTest, TestWriteDate) {
+    auto type_date = TypeDescriptor::from_logical_type(TYPE_DATE);
+    std::vector<TypeDescriptor> type_descs{type_date};
+
+    auto chunk = std::make_shared<Chunk>();
+    {
+        auto data_column = DateColumn::create();
+        {
+            Datum datum;
+            datum.set_date(DateValue::create(1999, 9, 9));
+            data_column->append_datum(datum);
+            datum.set_date(DateValue::create(1999, 9, 10));
+            data_column->append_datum(datum);
+            datum.set_date(DateValue::create(1999, 9, 11));
+            data_column->append_datum(datum);
+            data_column->append_default();
+        }
+
+        auto null_column = UInt8Column::create();
+        std::vector<uint8_t> nulls = {1, 0, 1, 0};
+        null_column->append_numbers(nulls.data(), nulls.size());
+        auto nullable_column = NullableColumn::create(data_column, null_column);
+        chunk->append_column(nullable_column, chunk->num_columns());
+    }
+
+    auto column_names = _make_type_names(type_descs);
+    ASSIGN_OR_ABORT(auto schema, OrcChunkWriter::make_schema(column_names, type_descs));
+
+    // write chunk
+    auto st = _write_chunk(chunk, type_descs, std::move(schema));
+    ASSERT_OK(st);
+
+    // read chunk
+    ChunkPtr read_chunk;
+    st = _read_chunk(read_chunk, column_names, type_descs);
+    ASSERT_OK(st);
+
+    // verify correctness
+    assert_equal_chunk(chunk.get(), read_chunk.get());
+}
+
+TEST_F(OrcChunkWriterTest, TestWriteTimestamp) {
+    auto type_datetime = TypeDescriptor::from_logical_type(TYPE_DATETIME);
+    std::vector<TypeDescriptor> type_descs{type_datetime};
+
+    auto chunk = std::make_shared<Chunk>();
+    {
+        // not-null column
+        auto data_column = TimestampColumn::create();
+        {
+            Datum datum;
+            datum.set_timestamp(TimestampValue::create(1999, 9, 9, 0, 0, 0));
+            data_column->append_datum(datum);
+            datum.set_timestamp(TimestampValue::create(1999, 9, 10, 1, 1, 1));
+            data_column->append_datum(datum);
+            datum.set_timestamp(TimestampValue::create(1999, 9, 11, 2, 2, 2));
+            data_column->append_datum(datum);
+            data_column->append_default();
+        }
+
+        auto null_column = UInt8Column::create();
+        std::vector<uint8_t> nulls = {1, 0, 1, 0};
+        null_column->append_numbers(nulls.data(), nulls.size());
+        auto nullable_column = NullableColumn::create(data_column, null_column);
+        chunk->append_column(nullable_column, chunk->num_columns());
+    }
+
+    auto column_names = _make_type_names(type_descs);
+    ASSIGN_OR_ABORT(auto schema, OrcChunkWriter::make_schema(column_names, type_descs));
+
+    // write chunk
+    auto st = _write_chunk(chunk, type_descs, std::move(schema));
+    ASSERT_OK(st);
+
+    // read chunk
+    ChunkPtr read_chunk;
+    st = _read_chunk(read_chunk, column_names, type_descs);
+    ASSERT_OK(st);
+
+    // check correctness
     assert_equal_chunk(chunk.get(), read_chunk.get());
 }
 
@@ -356,21 +429,19 @@ TEST_F(OrcChunkWriterTest, TestWriteStruct) {
         chunk->append_column(nullable_col, chunk->num_columns());
     }
 
-    // write chunk
     auto column_names = _make_type_names(type_descs);
-
-    SlotDesc default_slot_descs[] = {
-        {column_names[0], type_int_struct},
-        {""},
-    };
-
     ASSIGN_OR_ABORT(auto schema, OrcChunkWriter::make_schema(column_names, type_descs));
 
     // write chunk
     auto st = _write_chunk(chunk, type_descs, std::move(schema));
-    ChunkPtr read_chunk;
-    st = _read_chunk(read_chunk, default_slot_descs);
     ASSERT_OK(st);
+
+    // read chunk
+    ChunkPtr read_chunk;
+    st = _read_chunk(read_chunk, column_names, type_descs);
+    ASSERT_OK(st);
+
+    // verify correctness
     assert_equal_chunk(chunk.get(), read_chunk.get());
 }
 
@@ -416,21 +487,19 @@ TEST_F(OrcChunkWriterTest, TestWriteMap) {
         chunk->append_column(nullable_col, chunk->num_columns());
     }
 
-    // write chunk
     auto column_names = _make_type_names(type_descs);
-
-    SlotDesc default_slot_descs[] = {
-        {column_names[0], type_int_map},
-        {""},
-    };
-
     ASSIGN_OR_ABORT(auto schema, OrcChunkWriter::make_schema(column_names, type_descs));
 
     // write chunk
     auto st = _write_chunk(chunk, type_descs, std::move(schema));
-    ChunkPtr read_chunk;
-    st = _read_chunk(read_chunk, default_slot_descs);
     ASSERT_OK(st);
+
+    // read chunk
+    ChunkPtr read_chunk;
+    st = _read_chunk(read_chunk, column_names, type_descs);
+    ASSERT_OK(st);
+
+    // verify correctness
     assert_equal_chunk(chunk.get(), read_chunk.get());
 }
 
@@ -479,21 +548,19 @@ TEST_F(OrcChunkWriterTest, TestWriteNestedArray) {
         chunk->append_column(array_array_col, chunk->num_columns());
     }
 
-    // write chunk
     auto column_names = _make_type_names(type_descs);
-
-    SlotDesc default_slot_descs[] = {
-        {column_names[0], type_int_array_array},
-        {""},
-    };
-
     ASSIGN_OR_ABORT(auto schema, OrcChunkWriter::make_schema(column_names, type_descs));
 
     // write chunk
     auto st = _write_chunk(chunk, type_descs, std::move(schema));
-    ChunkPtr read_chunk;
-    st = _read_chunk(read_chunk, default_slot_descs);
     ASSERT_OK(st);
+
+    // read chunk
+    ChunkPtr read_chunk;
+    st = _read_chunk(read_chunk, column_names, type_descs);
+    ASSERT_OK(st);
+
+    // verify correctness
     assert_equal_chunk(chunk.get(), read_chunk.get());
 }
 
