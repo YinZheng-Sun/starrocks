@@ -14,7 +14,6 @@
 
 #include "formats/orc/file_writer.h"
 
-
 namespace starrocks::orc {
 
 // /*
@@ -64,7 +63,6 @@ namespace starrocks::orc {
 //     return;
 // }
 
-
 // FileWriterBase::FileWriterBase(std::unique_ptr<WritableFile> writable_file,
 //                                std::shared_ptr<orc::WriterOptions> options,
 //                                std::shared_ptr<orc::Type> schema,
@@ -82,8 +80,7 @@ namespace starrocks::orc {
 
 // UT
 FileWriterBase::FileWriterBase(std::unique_ptr<WritableFile> writable_file,
-                               std::shared_ptr<::orc::WriterOptions> options,
-                               std::shared_ptr<::orc::Type> schema,
+                               std::shared_ptr<::orc::WriterOptions> options, std::shared_ptr<::orc::Type> schema,
                                std::vector<TypeDescriptor> type_descs)
         : _options(std::move(options)), _schema(std::move(schema)), _type_descs(std::move(type_descs)) {
     _outstream = std::make_shared<OrcOutputStream>(std::move(writable_file));
@@ -100,4 +97,4 @@ FileWriterBase::FileWriterBase(std::unique_ptr<WritableFile> writable_file,
 // //     // _chunk_writer->write
 // // }
 
-}
+} // namespace starrocks::orc
